@@ -1,0 +1,7 @@
+opencv-python
+numpy
+pyserial
+pytest
+
+# 사람 검출 모델 라이브러리는 CLAUDE.md 3.3에 따라 실측 벤치마크 후 확정.
+# 후보 예시(미확정, 주석 처리): ultralytics(YOLO), mediapipe
