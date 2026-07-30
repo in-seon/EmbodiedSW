@@ -1,0 +1,191 @@
+"""Zone(횡단보도 ROI) 정의 + 5구역 위치 판정 + 잔류/점유 추적.
+
+CLAUDE.md 2.2: 횡단보도를 걷는 방향을 따라 위치 순서대로 5개 구역(1~5)으로 나누고,
+보행자가 어느 구역에 있는지에 따라 신호 연장 시간을 차등한다(config.ZONE_EXTENSION_SEC).
+연장 시간 결정은 signal_extend 모듈이 담당하고, 여기서는 "누가 몇 번 구역에 있는지"까지만 만든다.
+
+판정 기준점은 bounding box 하단 모서리의 중심(BoundingBox.foot_point)이다. 카메라가 사선으로
+비추므로 박스 중심점은 사람 키만큼 떠 있어 실제 서 있는 지점보다 카메라 쪽으로 당겨져 보인다
+(CLAUDE.md 2.1).
+
+구역 판정은 픽셀 좌표계의 폴리곤 포함 여부만으로 하며 실거리 변환이 필요 없다. 실거리가 필요한
+속도 추정은 별도 모듈(ground_plane.py + speed.py)이 맡는다. 다만 둘 다 같은 네 꼭짓점에서
+출발하므로, 여기서 zone 설정을 읽을 때 GroundPlane도 같이 만들어 `ground_plane` 속성으로 들고
+있는다(설정 파일을 두 번 읽지 않기 위함). 실측 치수가 없으면 None이고, 그래도 구역 판정은 정상 동작한다.
+"""
+
+import json
+
+from config import config
+from src.ground_plane import GroundPlane
+
+
+class Zone:
+    """폴리곤(또는 사각형) ROI. 좌표는 프레임 픽셀 좌표계."""
+
+    def __init__(self, points, name="crosswalk"):
+        if len(points) < 3:
+            raise ValueError("Zone은 최소 3개의 점으로 이루어진 폴리곤이어야 합니다.")
+        self.points = [(float(x), float(y)) for x, y in points]
+        self.name = name
+
+    def contains(self, point) -> bool:
+        """point가 zone 내부에 있는지 판정 (ray casting)."""
+        x, y = point
+        n = len(self.points)
+        inside = False
+        x1, y1 = self.points[0]
+        for i in range(1, n + 1):
+            x2, y2 = self.points[i % n]
+            if y > min(y1, y2) and y <= max(y1, y2) and x <= max(x1, x2):
+                if y1 != y2:
+                    x_intersect = (y - y1) * (x2 - x1) / (y2 - y1) + x1
+                if x1 == x2 or x <= x_intersect:
+                    inside = not inside
+            x1, y1 = x2, y2
+        return inside
+
+
+class CrosswalkZones:
+    """횡단보도를 걷는 방향을 따라 위치 순서대로 N개(기본 5개) 구역으로 나눈 묶음.
+
+    구역 번호는 1..N. 1과 N이 양 끝, 가운데(N=5면 3)가 중앙 구역이다.
+    """
+
+    def __init__(self, zones, name="crosswalk", ground_plane=None):
+        self.zones = list(zones)
+        self.name = name
+        # 속도 추정용 픽셀->cm 변환. 실측 치수가 없으면 None (구역 판정에는 영향 없음).
+        self.ground_plane = ground_plane
+
+    @staticmethod
+    def _lerp(p, q, t):
+        return (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
+
+    @classmethod
+    def from_quad(cls, corners, n=None, name="crosswalk", width_cm=None, length_cm=None):
+        """횡단보도 사각형의 네 꼭짓점을 받아 걷는 방향으로 N개 구역(스트립)으로 자른다.
+
+        corners 순서: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽].
+        걷는 방향은 '시작 변(0-1)' -> '끝 변(3-2)'. 이 방향을 따라 N등분한다.
+        (tools/zone_calibrator.py 가 이 순서대로 클릭받아 저장한다.)
+
+        width_cm/length_cm를 함께 주면 같은 네 점으로 GroundPlane(호모그래피)도 만든다.
+        둘 중 하나라도 없으면 ground_plane은 None이 되고 구역 판정만 동작한다.
+        """
+        n = n or config.CROSSWALK_ZONE_COUNT
+        if len(corners) != 4:
+            raise ValueError("corners는 [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽] 4개 점이어야 합니다.")
+        start_left, start_right, end_right, end_left = corners
+        zones = []
+        for k in range(n):
+            t0, t1 = k / n, (k + 1) / n
+            l0 = cls._lerp(start_left, end_left, t0)
+            r0 = cls._lerp(start_right, end_right, t0)
+            l1 = cls._lerp(start_left, end_left, t1)
+            r1 = cls._lerp(start_right, end_right, t1)
+            zones.append(Zone([l0, r0, r1, l1], name=f"{name}_{k + 1}"))
+        ground_plane = GroundPlane.from_quad(corners, width_cm, length_cm)
+        return cls(zones, name=name, ground_plane=ground_plane)
+
+    @classmethod
+    def load(cls, path=None):
+        """zone 설정 JSON을 읽는다.
+
+        지원 형식:
+          {"name": ..., "corners": [[x,y]*4], "n_zones": 5,
+           "real_width_cm": 90, "real_length_cm": 300}       # 4코너 자동 분할(권장)
+          {"name": ..., "zones": [[[x,y]*>=3], ...]}          # 구역 폴리곤을 직접 나열
+
+        실측 치수(real_width_cm / real_length_cm)는 선택 사항이다. 파일에 없으면 config의
+        CROSSWALK_REAL_WIDTH_CM / CROSSWALK_REAL_LENGTH_CM 로 대체하고, 그것도 없으면
+        ground_plane은 None이 된다(속도가 px/s로 떨어질 뿐 구역 판정은 정상).
+
+        'zones' 형식(폴리곤 직접 나열)에는 네 꼭짓점이 없으므로 호모그래피를 만들 수 없다.
+        속도를 cm/s로 내려면 'corners' 형식을 써야 한다.
+        """
+        path = path or config.ZONE_CONFIG_PATH
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        name = data.get("name", "crosswalk")
+        if "corners" in data:
+            width_cm = data.get("real_width_cm", config.CROSSWALK_REAL_WIDTH_CM)
+            length_cm = data.get("real_length_cm", config.CROSSWALK_REAL_LENGTH_CM)
+            return cls.from_quad(
+                data["corners"], n=data.get("n_zones"), name=name,
+                width_cm=width_cm, length_cm=length_cm,
+            )
+        if "zones" in data:
+            zones = [Zone(pts, name=f"{name}_{i + 1}") for i, pts in enumerate(data["zones"])]
+            return cls(zones, name=name)
+        raise ValueError("zone 설정에 'corners' 또는 'zones' 키가 필요합니다.")
+
+    def locate(self, point):
+        """point가 속한 구역 번호(1..N)를 반환. 어느 구역에도 없으면 None."""
+        for i, zone in enumerate(self.zones, start=1):
+            if zone.contains(point):
+                return i
+        return None
+
+    def __len__(self):
+        return len(self.zones)
+
+
+class CrosswalkOccupancy:
+    """트랙(사람 ID)별로 현재 위치한 구역을 추적한다.
+
+    검출 흔들림에 대비해, 횡단보도(아무 구역) 안에서 confirm_frames 이상 연속 검출돼야
+    '확정 보행자'로 본다. 트랙 ID 부여(추적/재식별)는 검출 파이프라인 책임이며 여기선 받기만 한다.
+
+    참고: 지금은 한 프레임이라도 검출이 끊기면 카운트를 리셋한다(단순·보수적). 추후 실측에서
+    깜빡임이 잦으면 '몇 프레임 유예(grace)' 로직을 추가해 완화할 수 있다.
+    """
+
+    def __init__(self, crosswalk_zones: CrosswalkZones, confirm_frames=None):
+        self.zones = crosswalk_zones
+        self.confirm_frames = confirm_frames or config.ZONE_RESIDENCY_FRAMES
+        if self.confirm_frames is None:
+            raise NotImplementedError(
+                "ZONE_RESIDENCY_FRAMES가 설정되지 않았습니다. 실측 FPS 기반으로 값을 정한 뒤 사용하세요."
+            )
+        # track_id -> {"count": 연속 프레임 수, "zone": 최근 구역 번호}
+        self._state = {}
+
+    def update(self, detections) -> dict:
+        """이번 프레임 검출을 반영하고, 확정 보행자의 {track_id: zone_index} 를 반환한다.
+
+        detections: (track_id, point) 튜플의 iterable. point는 보통 BoundingBox.foot_point().
+        """
+        seen = set()
+        for track_id, point in detections:
+            zone_index = self.zones.locate(point)
+            if zone_index is None:
+                self._state.pop(track_id, None)  # 횡단보도 밖 -> 카운트 리셋
+                continue
+            seen.add(track_id)
+            st = self._state.get(track_id, {"count": 0, "zone": None})
+            st["count"] += 1
+            st["zone"] = zone_index
+            self._state[track_id] = st
+
+        # 이번 프레임에 검출되지 않은 트랙 제거
+        for track_id in list(self._state):
+            if track_id not in seen:
+                self._state.pop(track_id, None)
+
+        return self.confirmed()
+
+    def confirmed(self) -> dict:
+        """확정 보행자 {track_id: zone_index}."""
+        return {
+            tid: st["zone"]
+            for tid, st in self._state.items()
+            if st["count"] >= self.confirm_frames
+        }
+
+    def occupied_zones(self) -> list:
+        """확정 보행자들이 점유 중인 구역 번호 목록(중복 제거·정렬)."""
+        return sorted(set(self.confirmed().values()))
+
+    def clear(self):
+        self._state.clear()

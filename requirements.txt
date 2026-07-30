@@ -3,5 +3,15 @@ numpy
 pyserial
 pytest
 
-# 사람 검출 모델 라이브러리는 CLAUDE.md 3.3에 따라 실측 벤치마크 후 확정.
-# 후보 예시(미확정, 주석 처리): ultralytics(YOLO), mediapipe
+# 검출 모델. CLAUDE.md 2.6에 따라 COCO 사전학습 yolov8n.pt를 그대로 쓰기로 확정했으므로
+# 이제 도구용이 아니라 핵심 의존성이다 (src/detection.py).
+# 가중치는 최초 실행 시 자동 다운로드된다(약 6MB).
+ultralytics
+
+# YOLO.track()의 프레임 간 매칭(선형 할당)에 필요. 없으면 track_id가 안 붙고
+# ModuleNotFoundError: No module named 'lap' 로 죽는다.
+# track_id는 속도 추정(SpeedEstimator)과 잔류 판정(CrosswalkOccupancy)의 전제다.
+lap
+
+# 라즈베리파이 배포 시 추론이 느리면 ncnn/tflite 변환을 검토한다 (CLAUDE.md 7장).
+# 실측 FPS 벤치마크 전까지 추가 의존성은 넣지 않는다.
