@@ -63,8 +63,12 @@ src/
 ├── serial_comm.py   라즈베리파이-제어부 시리얼 통신
 └── pipeline.py      전체 흐름을 잇는 파이프라인
 arduino/             아두이노 펌웨어
-tools/               zone 캘리브레이터, 파이 카메라 서버, 수동 카메라 점검
-tests/               단위 테스트
+tools/               사람이 직접 실행하는 세팅·확인 도구 (자동 테스트 아님)
+├── zone_calibrator.py             [PC]   네 꼭짓점 클릭 → zone_config.json 생성
+├── manual_camera_person_check.py  [PC]   검출+구역+속도+ETA+FPS 표시 (주력 확인 도구)
+├── pi_camera_server.py            [파이] 프레임을 MJPEG로 송출 (배치 B)
+└── manual_rpicam_person_check.py  [파이] CSI 카메라가 cv2로 안 잡힐 때 Picamera2 확인
+tests/               자동 단위 테스트 (pytest, 하드웨어 불필요)
 data/                zone 설정, 테스트 영상 (git 추적 제외)
 docs/                설계 결정 로그, 팀 인터페이스 합의 사항
 ```
@@ -94,9 +98,12 @@ docs/                설계 결정 로그, 팀 인터페이스 합의 사항
 
 ## 설치 / 실행 / 테스트
 
+이 프로젝트는 **`.venv`(Python 3.12, uv로 생성)** 를 쓴다. VSCode에서
+`Ctrl+Shift+P` → `Python: Select Interpreter` → `.\.venv\Scripts\python.exe` 를 선택할 것.
+
 ```bash
-pip install -r requirements.txt
-pytest             # 단위 테스트 (카메라·모델 없이 전부 통과)
+uv pip install -r requirements.txt   # .venv 활성화 상태에서
+pytest                               # 단위 테스트 (카메라·모델 없이 전부 통과)
 
 # 1) 카메라를 최종 위치에 고정한 뒤 캘리브레이션
 python tools/zone_calibrator.py --source 0 --width-cm 90 --length-cm 300
@@ -107,6 +114,9 @@ python tools/manual_camera_person_check.py
 # 3) (연장 파라미터·시리얼 확정 후) 전체 실시간 루프
 python main.py
 ```
+
+> uv로 만든 venv에는 `pip`이 없다. `python -m pip list`가 빈 결과를 내도 패키지가 없는 게 아니니
+> `uv pip list`로 확인할 것. 시스템에 별도로 깔린 Python 3.13과 헷갈리지 않게 주의.
 
 ## 라즈베리파이 연결
 

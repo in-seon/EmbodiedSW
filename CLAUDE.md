@@ -3,6 +3,23 @@
 이 문서는 Claude Code가 이 프로젝트에서 작업할 때 참고할 컨텍스트다.
 담당자(사용자)의 파트는 **목표 1: 보행자 잔류 감지 기반 신호 연장**이며, 이 문서는 해당 파트를 중심으로 작성한다.
 
+> **개발 환경 — 이 프로젝트는 `.venv`(Python 3.12)를 쓴다.**
+>
+> `.venv`는 uv로 만들어졌고 ultralytics·torch·opencv·pytest·lap이 모두 들어 있다.
+> VSCode에서 `Ctrl+Shift+P` → `Python: Select Interpreter` → `.\.venv\Scripts\python.exe` 선택.
+>
+> ```powershell
+> uv pip install <패키지명>     # .venv 활성화 상태에서. 설치 후 requirements.txt에도 추가할 것
+> .venv\Scripts\python.exe -m pytest    # 테스트
+> ```
+>
+> 주의할 점 두 가지:
+> - **uv로 만든 venv에는 `pip`이 없다.** `python -m pip list`가 빈 결과를 내도 패키지가 없는 게 아니다.
+>   확인은 `uv pip list`로 한다.
+> - 시스템에 Microsoft Store Python 3.13도 따로 깔려 있다. 그냥 `python`을 치면 그쪽이 잡히므로
+>   **패키지가 엉뚱한 환경에 설치되지 않게** 주의할 것. venv는 표준 라이브러리를 베이스 파이썬에서
+>   빌려 쓰므로 베이스를 지우면 venv도 죽는다.
+
 ---
 
 ## 1. 프로젝트 개요
@@ -175,11 +192,20 @@ src/
 ├── serial_comm.py      # 라즈베리파이-제어부 시리얼 통신
 └── pipeline.py         # 전체 흐름을 잇는 파이프라인
 arduino/                # 아두이노 펌웨어 코드
-tools/                  # zone_calibrator, pi_camera_server, manual_camera_person_check
-tests/                  # 단위 테스트
+tools/                  # 사람이 직접 실행하는 확인/세팅 도구 (자동 테스트 아님)
+├── zone_calibrator.py             # [PC] 네 꼭짓점 클릭 -> data/zone_config.json 생성. 가장 먼저 할 일
+├── manual_camera_person_check.py  # [PC] 검출+구역+속도+ETA+FPS 표시. 주력 확인 도구
+├── pi_camera_server.py            # [파이] 프레임을 MJPEG로 송출 (배치 B에서만)
+└── manual_rpicam_person_check.py  # [파이] CSI 카메라가 cv2로 안 잡힐 때 Picamera2 경로 확인용
+tests/                  # 자동 단위 테스트 (pytest). 카메라·모델·시리얼 없이 전부 돈다
 data/                   # zone 설정(zone_config.json), 테스트 영상 (git 추적 제외)
 docs/                   # 설계 결정 로그, 팀 합의 사항
 ```
+
+> `tests/`와 `tools/`의 역할이 다르다. **`tests/`는 "코드가 의도대로 도는가"**를 자동으로 검증하고
+> (구역 5등분 계산, 상한 초과 시 정지, 속도 부호 등), **`tools/`는 "현실이 가정과 맞는가"**를
+> 사람이 눈으로 확인한다(카메라가 켜지는가, 사람 모형을 인식하는가, 파이가 충분히 빠른가).
+> 서로를 대체할 수 없으므로 둘 다 유지한다. `tools/`의 파일이 `manual_`로 시작하는 것이 그 표시다.
 
 데이터 흐름은 `src/pipeline.py`의 `SignalExtensionPipeline`이 담당:
 
