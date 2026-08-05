@@ -183,7 +183,7 @@
 config/config.py        # 전역 설정 (미확정 값은 None + 주석)
 main.py                 # 실행 진입점
 src/
-├── capture.py          # 카메라 입력 (USB 웹캠 / 영상 파일 / 라즈베리파이 스트림 URL)
+├── capture.py          # 카메라 입력. 백엔드 2개: Picamera2(파이 CSI) / cv2(웹캠·영상·스트림)
 ├── detection.py        # 단일 YOLO 검출 래퍼 (yolov8n, person + (보류)교통약자)
 ├── ground_plane.py     # 호모그래피: 픽셀 좌표 -> 횡단보도 평면 좌표(cm)
 ├── zone.py             # Zone, 5구역 분할(CrosswalkZones), 점유 추적(CrosswalkOccupancy)
@@ -263,12 +263,37 @@ docs/                   # 설계 결정 로그, 팀 합의 사항
 > 비전 파트만 확인하고 싶다면 시리얼 없이 `tools/manual_camera_person_check.py`로 검출·구역·속도를
 > 눈으로 볼 수 있다.
 
+### 카메라 백엔드 — 파이 CSI는 `cv2`로 안 열린다
+
+**하드웨어 확정: 라즈베리파이 5 + CSI 리본 카메라.**
+
+라즈베리파이 5는 Raspberry Pi OS Bookworm 이상만 지원하고, Bookworm에서는 레거시 카메라
+스택(`bcm2835-v4l2`)이 제거됐다. 그래서 **CSI 카메라는 `/dev/video0`으로 잡히지 않고
+`cv2.VideoCapture(0)`이 실패한다.** libcamera 기반 `Picamera2`를 써야 한다.
+
+`src/capture.py`의 `CameraCapture`가 소스를 보고 백엔드를 고른다:
+
+| `config.CAMERA_SOURCE` | 백엔드 | 용도 |
+|---|---|---|
+| `"picamera2"` | Picamera2 | **파이 CSI 리본 카메라** |
+| `0`, `1`, ... | cv2 | PC/파이의 USB 웹캠 |
+| `"video.mp4"` | cv2 | 테스트 영상 |
+| `"http://<파이IP>:8000/"` | cv2 | 파이 MJPEG 스트림 |
+
+어느 백엔드든 `read_frame()`은 **BGR numpy 배열**을 돌려주므로 그 아래 단계
+(detection/zone/speed)는 카메라 종류를 몰라도 된다.
+
+> Picamera2에서 `format="RGB888"`은 이름과 달리 메모리상 **BGR 순서** 배열을 준다
+> (libcamera의 명명 규칙이 반대다). 덕분에 cv2와 형식이 같아진다 — 뒤집지 말 것.
+
+파이에 Picamera2 설치: `sudo apt install -y python3-picamera2`
+(venv를 쓴다면 `--system-site-packages`로 만들어야 시스템 패키지가 보인다.)
+
 ### 배치 A — 파이에서 직접 실행 (가장 단순)
 
-CSI 카메라(또는 USB 웹캠)를 파이에 연결하고, 파이 위에서 코드를 실행한다. VSCode Remote-SSH로 파이에 접속해 실행 가능.
+CSI 카메라를 파이에 연결하고, 파이 위에서 코드를 실행한다. VSCode Remote-SSH로 접속해 실행 가능.
 
-- `config.CAMERA_SOURCE = 0`. `cv2.VideoCapture(0)`가 그대로 프레임을 읽는다.
-  (CSI 카메라가 `/dev/video0`으로 안 잡히면 `libcamera`/`picamera2` 경유가 필요할 수 있다 — 실기에서 확인할 것.)
+- **`config.CAMERA_SOURCE = "picamera2"`** (CSI 카메라). USB 웹캠이면 `0`.
 - 제어부 보드도 보통 파이의 USB에 꽂으므로 `SERIAL_PORT`는 `/dev/ttyACM0` 또는 `/dev/ttyUSB0`.
 - 단점: 파이 CPU에서 YOLO 추론이 무겁다 → `ncnn`·`tflite` 변환, 해상도 축소 등 필요(실측 벤치마크).
 
@@ -276,14 +301,16 @@ CSI 카메라(또는 USB 웹캠)를 파이에 연결하고, 파이 위에서 코
 
 파이는 프레임만 내보내고, YOLO 추론은 성능 좋은 PC에서 돌린다.
 
-1. 파이에서: `python tools/pi_camera_server.py --source 0 --port 8000` (프레임을 MJPEG로 송출).
+1. 파이에서: `python tools/pi_camera_server.py --source picamera2 --port 8000` (MJPEG 송출).
+   이 스크립트도 `CameraCapture`를 쓰므로 CSI 카메라가 그대로 열린다.
 2. PC에서: `config.CAMERA_SOURCE = "http://<파이IP>:8000/"` 로 설정.
-   `CameraCapture`(=`cv2.VideoCapture(URL)`)가 네트워크 스트림을 그대로 프레임으로 받는다.
+   `CameraCapture`가 네트워크 스트림을 프레임으로 받는다.
 3. 제어부 보드를 PC에 꽂으면 시리얼도 PC에서, 파이에 꽂으면 파이에서 별도 중계가 필요하다(팀 배치에 따라 결정).
 
 > 주의: **호모그래피는 해상도에 종속된다.** 캘리브레이션할 때와 운영할 때의 프레임 해상도가 다르면
-> zone 좌표와 변환 행렬이 전부 어긋난다. 배치 A/B를 바꾸거나 스트림 해상도를 바꾸면 재캘리브레이션할 것.
+> zone 좌표와 변환 행렬이 전부 어긋난다. 해상도는 `config.CAMERA_RESOLUTION` 한 곳에서 정하며,
+> 배치 A/B를 바꾸거나 이 값을 바꾸면 **재캘리브레이션할 것.**
 
-> 요약: `src/capture.py`는 `CAMERA_SOURCE`가 정수/파일경로/URL 무엇이든 처리하므로, 프레임을
-> 가져오는 코드는 이미 준비돼 있다. 배치 B용 파이 송출 스크립트(`tools/pi_camera_server.py`)도 포함했다.
+> 캘리브레이션도 파이에서 그대로 된다:
+> `python tools/zone_calibrator.py --source picamera2 --width-cm .. --length-cm ..`
 > 같은 로컬 네트워크(공유기 안)에서만 쓰는 평문 스트림임에 유의.

@@ -54,7 +54,7 @@
 config/config.py     전역 설정 (미확정 값은 None + 주석)
 main.py              실행 진입점
 src/
-├── capture.py       카메라 입력 (웹캠 / 영상 파일 / 라즈베리파이 스트림 URL)
+├── capture.py       카메라 입력. Picamera2(파이 CSI) / cv2(웹캠·영상·스트림) 백엔드 자동 선택
 ├── detection.py     YOLO 검출 래퍼 (yolov8n, person + track_id)
 ├── ground_plane.py  호모그래피: 픽셀 좌표 → 횡단보도 평면 좌표(cm)
 ├── zone.py          Zone, 5구역 분할(CrosswalkZones), 점유 추적(CrosswalkOccupancy)
@@ -122,9 +122,17 @@ python main.py
 
 두 가지 배치 중 하나를 고른다. 자세한 설명은 [CLAUDE.md](CLAUDE.md) 7장 참고.
 
-- **A. 파이에서 직접 실행**: USB 웹캠을 파이에 꽂고 파이에서 `main.py` 실행.
-  `config.CAMERA_SOURCE = 0`. (VSCode Remote-SSH로 파이에 접속해 실행 가능.)
-- **B. 카메라는 파이, 추론은 PC**: 파이에서 `python tools/pi_camera_server.py` 실행,
+**하드웨어: 라즈베리파이 5 + CSI 리본 카메라.** 파이 5(Bookworm)에는 레거시 카메라 스택이
+없어 **CSI 카메라가 `cv2.VideoCapture`로 열리지 않는다.** `config.CAMERA_SOURCE = "picamera2"`
+로 두면 `CameraCapture`가 Picamera2(libcamera) 경로를 탄다.
+
+```bash
+sudo apt install -y python3-picamera2     # 파이에서 1회
+```
+
+- **A. 파이에서 직접 실행**: 파이에서 `main.py` 실행. `config.CAMERA_SOURCE = "picamera2"`.
+  (VSCode Remote-SSH로 파이에 접속해 실행 가능.)
+- **B. 카메라는 파이, 추론은 PC**: 파이에서 `python tools/pi_camera_server.py --source picamera2`,
   PC의 `config.CAMERA_SOURCE = "http://<파이IP>:8000/"` 로 설정 후 PC에서 실행.
 
 ## Zone 캘리브레이션

@@ -21,9 +21,10 @@
 해상도를 바꾸면 zone 좌표와 호모그래피가 모두 무효가 되어 다시 찍어야 한다.
 
 사용법:
-    python tools/zone_calibrator.py --source 0
+    python tools/zone_calibrator.py --source 0                     # PC USB 웹캠
+    python tools/zone_calibrator.py --source picamera2             # 파이 CSI 카메라
     python tools/zone_calibrator.py --source path/to/sample.jpg --n 5
-    python tools/zone_calibrator.py --source 0 --width-cm 90 --length-cm 300
+    python tools/zone_calibrator.py --source picamera2 --width-cm 90 --length-cm 300
 """
 
 import argparse
@@ -36,6 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config
+from src.capture import grab_one_frame
 from src.zone import CrosswalkZones
 
 _points = []
@@ -50,25 +52,16 @@ def _on_mouse(event, x, y, flags, param):
 
 
 def _grab_reference_frame(source):
+    """캘리브레이션할 정지 화면 한 장을 얻는다.
+
+    카메라 여는 로직은 src/capture.py 한 곳에 있다(파이 CSI = Picamera2, 그 외 = cv2).
+    덕분에 파이에서 `--source picamera2` 로 그대로 캘리브레이션할 수 있다.
+    """
     try:
         source = int(source)
     except (ValueError, TypeError):
-        pass  # 파일 경로 또는 URL인 경우
-
-    if isinstance(source, str) and Path(source).exists():
-        frame = cv2.imread(source)
-        if frame is None:
-            raise RuntimeError(f"이미지를 읽을 수 없습니다: {source}")
-        return frame
-
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        raise RuntimeError(f"카메라/영상을 열 수 없습니다: {source}")
-    ok, frame = cap.read()
-    cap.release()
-    if not ok:
-        raise RuntimeError("프레임을 읽을 수 없습니다.")
-    return frame
+        pass  # "picamera2" / 파일 경로 / URL 인 경우
+    return grab_one_frame(source)
 
 
 def _draw_preview(frame, n_zones):

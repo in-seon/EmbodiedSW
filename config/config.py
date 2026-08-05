@@ -107,12 +107,25 @@ DETECTION_TRACKER = "bytetrack.yaml"  # ultralytics 내장 추적기. 필요 시
 # =====================================================================
 # 카메라 (CLAUDE.md 2.1)
 # =====================================================================
-# CameraCapture가 그대로 cv2.VideoCapture에 넘긴다. 아래 중 하나를 쓸 수 있다.
-#   - 정수 0, 1, ...        : 이 코드를 "실행하는 컴퓨터"에 직접 연결된 카메라 인덱스
+# CameraCapture가 소스 종류를 보고 백엔드를 고른다. 아래 중 하나를 쓸 수 있다.
+#   - "picamera2"           : 라즈베리파이 CSI 리본 카메라 (Picamera2/libcamera 경유)
+#   - 정수 0, 1, ...        : 이 코드를 "실행하는 컴퓨터"에 직접 연결된 USB 웹캠 인덱스
 #   - "path/to/video.mp4"   : 테스트용 동영상 파일
 #   - "http://<파이IP>:8000/": 라즈베리파이가 tools/pi_camera_server.py 로 내보내는 MJPEG 스트림 URL
 #                             (카메라는 파이에, 무거운 추론은 PC에서 돌리는 구성)
+#
+# 중요: 라즈베리파이 5 + Raspberry Pi OS Bookworm에는 레거시 카메라 스택이 없어서
+# CSI 카메라가 /dev/video0으로 잡히지 않는다. 파이에서 CSI 카메라를 쓸 때는 반드시
+# "picamera2"로 둘 것. 0으로 두면 cv2.VideoCapture가 실패한다.
 CAMERA_SOURCE = 0
+
+# 프레임 해상도 (width, height). 두 백엔드(cv2 / Picamera2)에 동일하게 적용된다.
+#
+# 중요: zone 좌표와 호모그래피는 "캘리브레이션 당시 해상도"에 종속된다. 이 값을 바꾸면
+# data/zone_config.json이 통째로 무효가 되므로 재캘리브레이션해야 한다.
+# 값을 정한 근거: tools/manual_rpicam_person_check.py 로 파이에서 동작을 확인할 때 쓴 크기와
+# 같게 맞춰 둔 출발점이다. 파이 FPS가 부족하면 더 낮추고(연산량 감소), 그때 재캘리브레이션할 것.
+CAMERA_RESOLUTION = (640, 480)
 
 # 카메라는 보행자 신호등에 붙어 횡단보도를 "사선"으로 비춘다(탑뷰 아님).
 # 이 각도는 캘리브레이션 결과(호모그래피)에 그대로 반영되므로 아래 값은 기록용이다.

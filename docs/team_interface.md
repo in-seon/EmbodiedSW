@@ -48,7 +48,15 @@ COCO 사전학습 yolov8n에 휠체어/목발/지팡이 클래스가 없어 검�
 - [ ] 라즈베리파이-제어부 통신 프로토콜 — `SERIAL_PORT`, `SERIAL_BAUDRATE`, `SERIAL_MESSAGE_FORMAT`.
       (파이 → 제어부 연장/priority 명령, 제어부 → 파이 잔여 시간 읽기 양방향 포함)
 - [ ] 카메라 배치 방식 (배치 A: 파이에서 직접 실행 / 배치 B: 파이 카메라 + PC 추론) — CLAUDE.md 7장.
-- [ ] CSI 카메라가 `cv2.VideoCapture(0)`으로 잡히는지 실기 확인 (안 되면 `libcamera`/`picamera2` 경유).
+- [x] **CSI 카메라 접근 경로 — Picamera2로 확정.**
+      라즈베리파이 5는 Bookworm 이상만 지원하고 레거시 카메라 스택이 없어
+      `cv2.VideoCapture(0)`으로 CSI 카메라가 열리지 않는다. `src/capture.py`에 Picamera2
+      백엔드를 두고 `config.CAMERA_SOURCE = "picamera2"` 로 선택한다.
+      근거: 담당자가 파이에서 `tools/manual_rpicam_person_check.py`(Picamera2)로 정상 동작 확인.
+- [ ] 파이에 `python3-picamera2` 설치 확인 (`sudo apt install -y python3-picamera2`).
+      파이에서 venv를 쓴다면 `--system-site-packages`로 만들어야 보인다.
+- [ ] 운영 해상도 확정 — `CAMERA_RESOLUTION` (현재 640x480).
+      **캘리브레이션 해상도와 반드시 일치해야 한다.** 파이 FPS가 부족해 낮추면 재캘리브레이션 필요.
 - [ ] 카메라 설치 각도/높이 실측값 — `CAMERA_MOUNT_ANGLE_DEG` (사선 구도, 탑뷰 아님).
 
 ## 목표 2 연계

@@ -11,7 +11,9 @@ pytest 자동 수집 대상이 아니도록 tools/ 에 둔다(카메라 창을 �
   - 예상 통과 시간(cm/s 일 때만)
 
 사용법:
-    python tools/manual_camera_person_check.py
+    python tools/manual_camera_person_check.py                    # config.CAMERA_SOURCE 사용
+    python tools/manual_camera_person_check.py --source picamera2 # 파이 CSI 카메라
+    python tools/manual_camera_person_check.py --source 0         # PC USB 웹캠
     python tools/manual_camera_person_check.py --source path/to/test.mp4
     python tools/manual_camera_person_check.py --no-zones      # zone 설정 없이 검출만
 
@@ -31,6 +33,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config
+from src.capture import CameraCapture
 from src.detection import PersonDetector
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
@@ -79,7 +82,7 @@ def _draw_zones(frame, zones):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=config.CAMERA_SOURCE,
-                        help="카메라 인덱스 / 영상 경로 / 스트림 URL")
+                        help="'picamera2'(파이 CSI) / 카메라 인덱스 / 영상 경로 / 스트림 URL")
     parser.add_argument("--no-zones", action="store_true", help="zone 판정 없이 검출만 표시")
     parser.add_argument("--confirm-frames", type=int, default=config.ZONE_RESIDENCY_FRAMES or 3,
                         help="'확정 보행자'로 보기까지 필요한 연속 검출 프레임 수. "
@@ -97,16 +100,17 @@ def main():
     speed = SpeedEstimator(ground_plane=ground_plane)
     detector = PersonDetector()
 
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        raise RuntimeError(f"카메라를 열 수 없습니다: {source}")
+    # 카메라 여는 로직은 src/capture.py 한 곳에 있다.
+    # 파이 CSI 카메라는 --source picamera2, 그 외(USB 웹캠/영상/스트림)는 cv2가 처리한다.
+    camera = CameraCapture(source=source).open()
+    print(f"[안내] 카메라 백엔드: {camera.backend_name}  (source={source!r})")
 
     print("카메라 창에서 'q'를 누르면 종료합니다.")
     fps_t0, fps_frames, fps = time.monotonic(), 0, 0.0
 
     while True:
-        ok, frame = cap.read()
-        if not ok:
+        frame = camera.read_frame()
+        if frame is None:
             print("프레임을 읽을 수 없습니다.")
             break
 
@@ -156,13 +160,14 @@ def main():
             fps = fps_frames / (now - fps_t0)
             fps_t0, fps_frames = now, 0
         # 라즈베리파이 실측 FPS는 이 값으로 확인한다 (CLAUDE.md 2.6 — 추정치 기록 금지).
-        cv2.putText(frame, f"FPS {fps:.1f} | unit {speed.unit}", (10, 22), FONT, 0.6, WHITE, 2)
+        cv2.putText(frame, f"FPS {fps:.1f} | {camera.backend_name} | unit {speed.unit}",
+                    (10, 22), FONT, 0.6, WHITE, 2)
 
         cv2.imshow("Detection + Zone + Speed (q: quit)", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
-    cap.release()
+    camera.close()
     cv2.destroyAllWindows()
 
 
