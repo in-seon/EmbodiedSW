@@ -64,8 +64,13 @@ def _grab_reference_frame(source):
     return grab_one_frame(source)
 
 
-def _draw_preview(frame, n_zones):
-    """현재 클릭된 점과, 4점이 다 찍혔으면 N등분 미리보기를 그린다."""
+def _draw_preview(frame, n_zones, width_cm=None, length_cm=None):
+    """현재 클릭된 점과, 4점이 다 찍혔으면 N등분 미리보기를 그린다.
+
+    치수를 함께 넘기는 것이 중요하다. 치수가 있으면 구역이 '실제 거리' 기준으로 나뉘므로
+    (CrosswalkZones.from_quad 참고) 미리보기가 저장될 결과와 같아진다. 치수 없이 그리면
+    화면상 균등 분할이 보이는데, 그건 실제로는 균등하지 않은 대체 경로다.
+    """
     display = frame.copy()
     for i, p in enumerate(_points):
         cv2.circle(display, p, 5, (0, 0, 255), -1)
@@ -73,7 +78,9 @@ def _draw_preview(frame, n_zones):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
     if len(_points) == 4:
-        zones = CrosswalkZones.from_quad(_points, n=n_zones)
+        zones = CrosswalkZones.from_quad(
+            _points, n=n_zones, width_cm=width_cm, length_cm=length_cm
+        )
         for idx, zone in enumerate(zones.zones, start=1):
             pts = np.array(zone.points, dtype=np.int32)
             cv2.polylines(display, [pts], True, (0, 255, 0), 2)
@@ -114,7 +121,7 @@ def main():
     cv2.setMouseCallback(window, _on_mouse)
 
     while True:
-        cv2.imshow(window, _draw_preview(frame, args.n))
+        cv2.imshow(window, _draw_preview(frame, args.n, args.width_cm, args.length_cm))
         key = cv2.waitKey(20) & 0xFF
 
         if key == ord("q"):

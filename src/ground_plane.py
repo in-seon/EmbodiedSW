@@ -40,10 +40,25 @@ class GroundPlane:
     치수가 들어 있으면 자동으로 만들어 준다.
     """
 
-    def __init__(self, matrix, width_cm, length_cm):
-        self.matrix = matrix
+    def __init__(self, matrix, inverse_matrix, width_cm, length_cm):
+        self.matrix = matrix                  # 픽셀 -> 평면(cm)
+        self.inverse_matrix = inverse_matrix  # 평면(cm) -> 픽셀
         self.width_cm = float(width_cm)
         self.length_cm = float(length_cm)
+
+    @staticmethod
+    def _apply(matrix, point):
+        """3x3 사영변환을 한 점에 적용한다 (동차좌표 나눗셈 포함)."""
+        px, py = float(point[0]), float(point[1])
+        m = matrix
+        denom = m[2][0] * px + m[2][1] * py + m[2][2]
+        if abs(denom) < 1e-12:
+            # 소실선 위의 점 — 대응하는 상이 무한대라 변환 불가.
+            raise ValueError(f"변환할 수 없는 점입니다(소실선 근처): {point}")
+        x = (m[0][0] * px + m[0][1] * py + m[0][2]) / denom
+        y = (m[1][0] * px + m[1][1] * py + m[1][2]) / denom
+        # numpy 스칼라가 아래 단계(speed 계산, JSON 저장)로 새지 않도록 순수 float로 반환.
+        return (float(x), float(y))
 
     @classmethod
     def from_quad(cls, corners, width_cm, length_cm):
@@ -76,7 +91,8 @@ class GroundPlane:
             dtype=np.float32,
         )
         matrix = cv2.getPerspectiveTransform(src, dst)
-        return cls(matrix, width_cm, length_cm)
+        inverse_matrix = cv2.getPerspectiveTransform(dst, src)
+        return cls(matrix, inverse_matrix, width_cm, length_cm)
 
     @classmethod
     def from_config(cls, corners):
@@ -89,15 +105,19 @@ class GroundPlane:
         횡단보도 사각형 밖의 점도 변환된다(외삽). 값이 [0,width]x[0,length]를 벗어나면
         횡단보도 밖이라는 뜻이다. 구역 판정은 zone.py가 따로 하므로 여기서 막지 않는다.
         """
-        px, py = float(point[0]), float(point[1])
-        m = self.matrix
-        denom = m[2][0] * px + m[2][1] * py + m[2][2]
-        if abs(denom) < 1e-12:
-            # 소실선 위의 점 — 지면 평면상 무한대에 대응하므로 변환 불가.
-            raise ValueError(f"평면 좌표로 변환할 수 없는 점입니다(소실선 근처): {point}")
-        x = (m[0][0] * px + m[0][1] * py + m[0][2]) / denom
-        y = (m[1][0] * px + m[1][1] * py + m[1][2]) / denom
-        return (x, y)
+        return self._apply(self.matrix, point)
+
+    def to_pixel(self, ground_point):
+        """평면 좌표 (x_cm, y_cm) -> 픽셀 좌표 (px, py). to_ground의 역변환.
+
+        "실제 거리 기준으로 정한 위치"를 화면에 그리거나 픽셀 기준 판정에 쓸 때 필요하다.
+        구역을 실제 거리로 균등 분할한 뒤 그 경계선을 화면 좌표로 되돌리는 데 쓴다
+        (zone.py의 CrosswalkZones.from_quad 참고).
+
+        사영변환은 직선을 직선으로 보내므로, 평면상 직사각형 띠는 픽셀상 사각형이 된다
+        — 즉 경계 두 점만 변환하면 정확한 구역 폴리곤이 나온다(근사가 아니다).
+        """
+        return self._apply(self.inverse_matrix, ground_point)
 
     def remaining_distance_cm(self, ground_point, direction):
         """진행 방향 기준으로 반대편 끝까지 남은 거리(cm).

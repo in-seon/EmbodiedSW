@@ -94,6 +94,29 @@ def test_perspective_correction_beats_raw_pixels():
     assert near_half_cm + far_half_cm == pytest.approx(TRAP_L_CM, abs=1e-4)
 
 
+def test_to_pixel_is_inverse_of_to_ground():
+    """평면 -> 픽셀 역변환. 구역을 실제 거리로 나눈 뒤 화면에 되돌릴 때 쓴다."""
+    plane = GroundPlane.from_quad(TRAPEZOID_PX, TRAP_W_CM, TRAP_L_CM)
+    for px_point in [(50, 120), (35, 60), (95, 195), (10, 199)]:
+        ground = plane.to_ground(px_point)
+        approx(plane.to_pixel(ground), px_point, tol=1e-4)
+
+
+def test_to_pixel_maps_rectangle_corners_back():
+    plane = GroundPlane.from_quad(TRAPEZOID_PX, TRAP_W_CM, TRAP_L_CM)
+    approx(plane.to_pixel((0, 0)), TRAPEZOID_PX[0], tol=1e-4)
+    approx(plane.to_pixel((TRAP_W_CM, 0)), TRAPEZOID_PX[1], tol=1e-4)
+    approx(plane.to_pixel((TRAP_W_CM, TRAP_L_CM)), TRAPEZOID_PX[2], tol=1e-4)
+    approx(plane.to_pixel((0, TRAP_L_CM)), TRAPEZOID_PX[3], tol=1e-4)
+
+
+def test_transforms_return_plain_floats():
+    """numpy 스칼라가 속도 계산이나 JSON 저장으로 새지 않아야 한다."""
+    plane = GroundPlane.from_quad(RECT_PX, RECT_W_CM, RECT_L_CM)
+    for value in (*plane.to_ground((50, 100)), *plane.to_pixel((25, 50))):
+        assert type(value) is float
+
+
 def test_point_outside_crosswalk_extrapolates():
     """횡단보도 밖의 점도 변환된다(범위 밖 값으로). 구역 판정은 zone.py가 따로 한다."""
     plane = GroundPlane.from_quad(RECT_PX, RECT_W_CM, RECT_L_CM)

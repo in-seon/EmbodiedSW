@@ -63,19 +63,30 @@ class CrosswalkZones:
         return (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
 
     @classmethod
-    def from_quad(cls, corners, n=None, name="crosswalk", width_cm=None, length_cm=None):
-        """횡단보도 사각형의 네 꼭짓점을 받아 걷는 방향으로 N개 구역(스트립)으로 자른다.
+    def _split_on_ground(cls, ground_plane, n, name):
+        """실제 거리(cm) 기준으로 N등분한 뒤, 경계를 픽셀 좌표로 되돌린다.
 
-        corners 순서: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽].
-        걷는 방향은 '시작 변(0-1)' -> '끝 변(3-2)'. 이 방향을 따라 N등분한다.
-        (tools/zone_calibrator.py 가 이 순서대로 클릭받아 저장한다.)
-
-        width_cm/length_cm를 함께 주면 같은 네 점으로 GroundPlane(호모그래피)도 만든다.
-        둘 중 하나라도 없으면 ground_plane은 None이 되고 구역 판정만 동작한다.
+        이것이 올바른 분할이다. 사영변환은 직선을 직선으로 보내므로, 평면상 직사각형 띠의
+        네 꼭짓점만 역변환하면 화면상 정확한 구역 사각형이 된다(근사가 아니다).
         """
-        n = n or config.CROSSWALK_ZONE_COUNT
-        if len(corners) != 4:
-            raise ValueError("corners는 [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽] 4개 점이어야 합니다.")
+        zones = []
+        step = ground_plane.length_cm / n
+        width = ground_plane.width_cm
+        for k in range(n):
+            y0, y1 = k * step, (k + 1) * step
+            l0 = ground_plane.to_pixel((0.0, y0))
+            r0 = ground_plane.to_pixel((width, y0))
+            r1 = ground_plane.to_pixel((width, y1))
+            l1 = ground_plane.to_pixel((0.0, y1))
+            zones.append(Zone([l0, r0, r1, l1], name=f"{name}_{k + 1}"))
+        return zones
+
+    @classmethod
+    def _split_on_pixels(cls, corners, n, name):
+        """화면(픽셀) 위에서 균등 분할하는 대체 경로 — 실측 치수가 없을 때만 쓴다.
+
+        원근 때문에 실제 거리로는 균등하지 않다. 아래 from_quad 주석 참고.
+        """
         start_left, start_right, end_right, end_left = corners
         zones = []
         for k in range(n):
@@ -85,7 +96,45 @@ class CrosswalkZones:
             l1 = cls._lerp(start_left, end_left, t1)
             r1 = cls._lerp(start_right, end_right, t1)
             zones.append(Zone([l0, r0, r1, l1], name=f"{name}_{k + 1}"))
+        return zones
+
+    @classmethod
+    def from_quad(cls, corners, n=None, name="crosswalk", width_cm=None, length_cm=None):
+        """횡단보도 사각형의 네 꼭짓점을 받아 걷는 방향으로 N개 구역(스트립)으로 자른다.
+
+        corners 순서: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽].
+        걷는 방향은 '시작 변(0-1)' -> '끝 변(3-2)'. 이 방향을 따라 N등분한다.
+        (tools/zone_calibrator.py 가 이 순서대로 클릭받아 저장한다.)
+
+        ## 어디서 5등분하는가 — 화면이 아니라 '실제 거리' 기준이다
+
+        사선 카메라에서는 **화면상 균등 분할이 실제로는 전혀 균등하지 않다.** 원근 때문에
+        먼 쪽 1픽셀이 가까운 쪽 1픽셀보다 훨씬 긴 실거리를 나타내기 때문이다.
+        폭 400cm x 길이 1000cm 횡단보도를 사선으로 본 실측 예에서, 화면상 5등분은 실제로
+        이런 구역을 만든다:
+
+            1번  77cm  |  2번 105cm  |  3번 152cm  |  4번 238cm  |  5번 429cm
+
+        1번과 5번이 5.6배 차이나고, 더 중요하게는 **횡단보도의 진짜 한가운데(500cm)가
+        3번이 아니라 4번 구역에 들어간다.** "정중앙에 있으면 가장 길게 연장한다"는
+        설계 전제(CLAUDE.md 2.4)가 그대로 깨진다.
+
+        그래서 호모그래피가 있으면 **평면 좌표(cm)에서 균등 분할한 뒤 픽셀로 되돌린다**
+        (`_split_on_ground`). 그러면 각 구역이 실제로 200cm씩 담당한다.
+
+        width_cm/length_cm가 없으면 호모그래피를 만들 수 없으므로 화면상 분할로 대체하고
+        (`_split_on_pixels`), 위와 같은 왜곡을 감수한다. 실측 치수를 넣는 것이 정확도에
+        직결되는 이유가 이것이다.
+        """
+        n = n or config.CROSSWALK_ZONE_COUNT
+        if len(corners) != 4:
+            raise ValueError("corners는 [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽] 4개 점이어야 합니다.")
+
         ground_plane = GroundPlane.from_quad(corners, width_cm, length_cm)
+        if ground_plane is not None:
+            zones = cls._split_on_ground(ground_plane, n, name)
+        else:
+            zones = cls._split_on_pixels(corners, n, name)
         return cls(zones, name=name, ground_plane=ground_plane)
 
     @classmethod

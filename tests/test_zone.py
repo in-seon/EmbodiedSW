@@ -1,5 +1,6 @@
 import pytest
 
+from src.ground_plane import GroundPlane
 from src.zone import CrosswalkOccupancy, CrosswalkZones, Zone
 
 SQUARE = [(0, 0), (10, 0), (10, 10), (0, 10)]
@@ -8,6 +9,21 @@ SQUARE = [(0, 0), (10, 0), (10, 10), (0, 10)]
 # corners: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽]
 # -> 5등분하면 구역 k는 x in [10*(k-1), 10*k], y in [0,10].
 QUAD = [(0, 0), (0, 10), (50, 10), (50, 0)]
+
+# 사선 카메라로 본 횡단보도(사다리꼴) — 먼 쪽(끝 변)이 화면에서 좁고 위에 보인다.
+# 실제 치수는 폭 400cm x 길이 1000cm 인 직사각형.
+OBLIQUE_QUAD = [(80, 460), (560, 460), (400, 150), (240, 150)]
+OBLIQUE_W_CM, OBLIQUE_L_CM = 400.0, 1000.0
+
+
+def _zone_boundaries_cm(zones, ground_plane):
+    """각 구역의 '끝 변' 중점이 평면상 몇 cm 지점인지 돌려준다."""
+    out = []
+    for zone in zones.zones:
+        left_end, right_end = zone.points[3], zone.points[2]
+        mid = ((left_end[0] + right_end[0]) / 2, (left_end[1] + right_end[1]) / 2)
+        out.append(ground_plane.to_ground(mid)[1])
+    return out
 
 
 # --- Zone (단일 폴리곤) ---
@@ -39,6 +55,68 @@ def test_locate_returns_zone_index_by_position():
 def test_locate_outside_returns_none():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     assert zones.locate((100, 100)) is None
+
+
+# --- 사선 구도에서의 구역 분할 (원근 보정) ---
+# 화면상 균등 분할은 실제 거리로는 균등하지 않다. 실측 치수가 있으면 평면 좌표(cm)에서
+# 나눈 뒤 픽셀로 되돌려야 각 구역이 실제로 같은 거리를 담당한다.
+
+def test_zones_are_equal_in_real_distance_with_dimensions():
+    zones = CrosswalkZones.from_quad(
+        OBLIQUE_QUAD, n=5, width_cm=OBLIQUE_W_CM, length_cm=OBLIQUE_L_CM
+    )
+    boundaries = _zone_boundaries_cm(zones, zones.ground_plane)
+
+    # 구역 경계가 200, 400, 600, 800, 1000 cm 에 정확히 놓여야 한다.
+    assert boundaries == pytest.approx([200.0, 400.0, 600.0, 800.0, 1000.0], abs=1e-3)
+
+
+def test_true_center_of_crosswalk_lands_in_middle_zone():
+    """설계 전제 그 자체 — '정중앙에 있으면 가장 길게 연장'(CLAUDE.md 2.4).
+
+    실제 한가운데(500cm)가 3번 구역에 있어야 그 규칙이 의미를 갖는다.
+    화면상 분할로는 4번 구역에 들어가 규칙이 엉뚱한 위치에 적용된다.
+    """
+    zones = CrosswalkZones.from_quad(
+        OBLIQUE_QUAD, n=5, width_cm=OBLIQUE_W_CM, length_cm=OBLIQUE_L_CM
+    )
+    center_px = zones.ground_plane.to_pixel((OBLIQUE_W_CM / 2, OBLIQUE_L_CM / 2))
+
+    assert zones.locate(center_px) == 3
+
+
+def test_pixel_split_is_uneven_without_dimensions():
+    """치수가 없으면 화면상 분할로 대체된다 — 그때 왜곡이 얼마나 되는지 못박아 둔다.
+
+    이 테스트는 대체 경로가 부정확하다는 사실 자체를 기록한다. 정확도를 원하면
+    실측 치수를 넣어야 한다는 근거다.
+    """
+    zones = CrosswalkZones.from_quad(OBLIQUE_QUAD, n=5)
+    assert zones.ground_plane is None  # 치수가 없으니 호모그래피도 없다
+
+    reference = GroundPlane.from_quad(OBLIQUE_QUAD, OBLIQUE_W_CM, OBLIQUE_L_CM)
+    boundaries = _zone_boundaries_cm(zones, reference)
+    lengths = [b - a for a, b in zip([0.0] + boundaries, boundaries)]
+
+    # 가장 먼 구역이 가장 가까운 구역보다 5배 이상 길다.
+    assert max(lengths) > min(lengths) * 5
+    # 그리고 실제 한가운데가 3번이 아닌 더 뒤쪽 구역에 들어간다.
+    assert zones.locate(reference.to_pixel((OBLIQUE_W_CM / 2, OBLIQUE_L_CM / 2))) == 4
+
+
+def test_zone_count_and_coverage_unchanged_by_correction():
+    """분할 방식이 바뀌어도 구역 개수와 전체 범위는 그대로여야 한다."""
+    zones = CrosswalkZones.from_quad(
+        OBLIQUE_QUAD, n=5, width_cm=OBLIQUE_W_CM, length_cm=OBLIQUE_L_CM
+    )
+    assert len(zones) == 5
+
+    gp = zones.ground_plane
+    # 양 끝과 중간 지점들이 빠짐없이 어느 구역엔가 속한다.
+    for y_cm in [1.0, 199.0, 201.0, 500.0, 999.0]:
+        assert zones.locate(gp.to_pixel((OBLIQUE_W_CM / 2, y_cm))) is not None
+    # 횡단보도 밖(뒤쪽)은 어느 구역에도 속하지 않는다.
+    assert zones.locate(gp.to_pixel((OBLIQUE_W_CM / 2, -50.0))) is None
 
 
 # --- CrosswalkOccupancy (확정 보행자/점유 구역) ---
