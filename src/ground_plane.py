@@ -80,8 +80,8 @@ class GroundPlane:
 
         import cv2  # 지연 임포트: 좌표 계산만 하는 테스트가 OpenCV 없이도 돌게 한다.
 
-        src = np.array(corners, dtype=np.float32)
-        dst = np.array(
+        src = np.array(corners, dtype=np.float32) # 영상 좌표
+        dst = np.array(                           # 실제 좌표
             [
                 [0.0, 0.0],                  # 시작-왼쪽
                 [float(width_cm), 0.0],      # 시작-오른쪽
