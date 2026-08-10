@@ -41,11 +41,11 @@ CLAUDE.md 5장: 파라미터를 정할 때 근거를 남겨 대회 발표 자료
 
 ### 2026-08-05: 라즈베리파이 CSI 카메라 접근 경로를 Picamera2로 확정
 
-- **결정값**: `src/capture.py`에 Picamera2 백엔드 추가, `config.CAMERA_SOURCE = "picamera2"` 로 선택.
+- **결정값**: `src/capture.py`에Picamera2 백엔드 추가, `config.CAMERA_SOURCE = "picamera2"` 로 선택.
 - **근거**: 하드웨어가 라즈베리파이 5 + CSI 리본 카메라로 확정됐다. 파이 5는 Raspberry Pi OS
   Bookworm 이상만 지원하고 Bookworm에는 레거시 카메라 스택(`bcm2835-v4l2`)이 없어
   CSI 카메라가 `/dev/video0`으로 잡히지 않는다. `cv2.VideoCapture(0)`은 실패한다.
-  담당자가 파이에서 `tools/manual_rpicam_person_check.py`(Picamera2 직접 호출)로 정상 동작을 확인했다.
+  담당자가 파이에서 `tools/manual_rpicam_person_check.py`( Picamera2 직접 호출)로 정상 동작을 확인했다.
 - **참고 자료/벤치마크**: Picamera2의 `format="RGB888"`은 이름과 달리 메모리상 BGR 순서 배열을
   반환한다(libcamera 명명 규칙). 덕분에 cv2 백엔드와 형식이 일치해 하위 단계가 카메라 종류를
   몰라도 된다. 라즈베리파이 실측 FPS는 아직 미측정.
