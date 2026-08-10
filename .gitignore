@@ -1,0 +1,28 @@
+# 가상환경
+venv/
+.venv/
+
+# 파이썬
+__pycache__/
+*.py[cod]
+
+# 모델 가중치 (자동 다운로드됨)
+*.pt
+*.onnx
+*.engine
+
+# 데이터셋 / 캡처 덤프
+raw_data/
+*.npz
+*.mp4
+*.avi
+
+# 실측 로그
+poc_metrics.csv
+poc_metrics_*.csv
+
+# 에디터 / OS
+.vscode/
+.idea/
+.DS_Store
+
