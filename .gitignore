@@ -15,4 +15,4 @@ data/*
 .vscode/
 .idea/
 CLAUDE.md
-AGENT.md
+AGENTS.md
