@@ -18,8 +18,9 @@ from config import config
 
 
 class SignalState(Enum):
-    NORMAL = auto()     # 일반 신호 진행, 연장 조건 미충족
+    NORMAL = auto()     # 일반 신호 진행, 연장 조건 미충족 (무장 상태)
     EXTENDING = auto()  # 이번 판단에서 연장 발생
+    EXTENDED = auto()   # 이번 하강 구간에서 이미 연장을 발급함 — 제어부 반영 대기 중
     CAPPED = auto()     # 상한 도달, 더 이상 연장 불가
 
 
@@ -67,6 +68,11 @@ class SignalExtensionStateMachine:
 
         self.state = SignalState.NORMAL
         self.accumulated_extension_sec = 0
+        # 엣지 트리거용 '무장' 플래그. evaluate()는 실시간 루프에서 매 프레임 호출되므로,
+        # 조건이 참인 동안 계속 연장을 누적하면 순식간에 상한을 소진하고 제어부로 같은 명령을
+        # 연타로 보내게 된다. 그래서 '잔여시간이 임계값 아래로 내려온 구간'당 한 번만 발급한다.
+        # 무장은 '연장을 실제로 발급'할 때만 소모되고, 잔여시간이 임계값 위로 회복되면 되살아난다.
+        self._armed = True
 
     @staticmethod
     def _extension_for_zone(ext_map, zone_index) -> int:
@@ -97,12 +103,20 @@ class SignalExtensionStateMachine:
             else self.max_total_extension_sec
         )
 
+        # 잔여시간이 넉넉하면 연장 조건 자체가 아니다. 이때 무장을 되살린다 —
+        # 직전 연장이 제어부에 반영돼 시간이 회복됐다는 뜻이므로, 다음 하강에서 다시 판단해야 한다.
+        if remaining_time_sec > self.remaining_time_threshold_sec:
+            self._armed = True
+            self.state = SignalState.NORMAL
+            return 0
+
         if self.accumulated_extension_sec >= cap:
             self.state = SignalState.CAPPED
             return 0
 
-        if remaining_time_sec > self.remaining_time_threshold_sec:
-            self.state = SignalState.NORMAL
+        # 이번 하강 구간에서 이미 발급했다면 제어부가 반영할 때까지 더 보내지 않는다.
+        if not self._armed:
+            self.state = SignalState.EXTENDED
             return 0
 
         zones = [z for z in occupied_zones if z is not None]
@@ -119,10 +133,17 @@ class SignalExtensionStateMachine:
 
         step = min(desired, cap - self.accumulated_extension_sec)
         self.accumulated_extension_sec += step
+        self._armed = False   # 이번 하강 구간의 무장 소모
         self.state = SignalState.EXTENDING
         return step
 
     def reset(self):
-        """다음 보행 신호 사이클 시작 시 호출 (누적 연장 초기화)."""
+        """다음 보행 신호 사이클 시작 시 호출 (누적 연장·무장 초기화).
+
+        직접 부르기보다 SignalExtensionPipeline.begin_new_cycle()을 쓴다. 그쪽이 잔류
+        카운트·속도 히스토리·추적 상태까지 같이 정리한다. 이걸 아무도 부르지 않으면
+        누적 연장이 사이클을 넘어 남아, 한 번 상한을 찍은 뒤로는 영구히 CAPPED가 된다.
+        """
         self.state = SignalState.NORMAL
         self.accumulated_extension_sec = 0
+        self._armed = True

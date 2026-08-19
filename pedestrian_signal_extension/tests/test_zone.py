@@ -1,5 +1,8 @@
+import json
+
 import pytest
 
+from config import config
 from src.ground_plane import GroundPlane
 from src.zone import CrosswalkOccupancy, CrosswalkZones, Zone
 
@@ -153,3 +156,92 @@ def test_occupancy_missing_config_raises():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     with pytest.raises(NotImplementedError):
         CrosswalkOccupancy(zones, confirm_frames=None)
+
+
+# --- 캘리브레이션 해상도 검증 (버그 C) ---
+
+def _write_zone_config(tmp_path, **extra):
+    payload = {
+        "name": "crosswalk",
+        "corners": [list(p) for p in QUAD],
+        "n_zones": 5,
+    }
+    payload.update(extra)
+    path = tmp_path / "zone_config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_load_rejects_frame_size_mismatch(tmp_path):
+    """캘리브레이션 해상도와 운영 해상도가 다르면 좌표가 통째로 어긋난다 -> 즉시 실패해야 한다.
+
+    수정 전에는 zone_calibrator가 frame_size를 저장해 두는데도 load()가 읽지 않아,
+    에러 없이 구역만 엉뚱하게 잡히는 '조용한 오작동'이 났다.
+    """
+    path = _write_zone_config(tmp_path, frame_size=[1280, 720])
+
+    with pytest.raises(ValueError) as exc:
+        CrosswalkZones.load(path, expected_frame_size=(640, 480))
+
+    assert "1280x720" in str(exc.value)
+    assert "640x480" in str(exc.value)
+
+
+def test_load_accepts_matching_frame_size(tmp_path):
+    path = _write_zone_config(tmp_path, frame_size=[640, 480])
+    zones = CrosswalkZones.load(path, expected_frame_size=(640, 480))
+    assert len(zones) == 5
+
+
+def test_load_allows_config_without_frame_size(tmp_path):
+    """frame_size가 없는 옛 설정 파일은 검증할 방법이 없으므로 그대로 통과시킨다."""
+    path = _write_zone_config(tmp_path)
+    assert len(CrosswalkZones.load(path, expected_frame_size=(640, 480))) == 5
+
+
+def test_load_uses_config_resolution_by_default(tmp_path, monkeypatch):
+    """expected_frame_size를 안 주면 config.CAMERA_RESOLUTION과 비교한다."""
+    monkeypatch.setattr(config, "CAMERA_RESOLUTION", (640, 480))
+    path = _write_zone_config(tmp_path, frame_size=[320, 240])
+
+    with pytest.raises(ValueError):
+        CrosswalkZones.load(path)
+
+
+# --- 추적 ID가 없는 검출 (버그 D) ---
+
+def test_occupancy_ignores_untracked_detections():
+    """track_id=None인 검출은 잔류 판정에서 제외한다 (SpeedEstimator와 동일한 규칙).
+
+    수정 전에는 None을 그대로 딕셔너리 키로 써서, 같은 프레임 안의 여러 사람이
+    하나의 카운터를 각각 증가시켰다. 아래는 한 프레임 만에 confirm_frames=3을 채워
+    잔류 검증이 무력화되던 케이스다.
+    """
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=3)
+
+    result = occ.update([(None, (5, 5)), (None, (25, 5)), (None, (45, 5))])
+
+    assert result == {}
+    assert occ.occupied_zones() == []
+
+
+def test_occupancy_reports_untracked_count():
+    """무시한 검출 수를 노출한다 — 조용히 놓치지 않고 실측에서 눈에 보이게 하기 위함."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=1)
+
+    occ.update([("p1", (25, 5)), (None, (5, 5)), (None, (45, 5))])
+    assert occ.untracked_count == 2
+
+    occ.update([("p1", (25, 5))])
+    assert occ.untracked_count == 0
+
+
+def test_untracked_detection_does_not_disturb_tracked_one():
+    """ID 없는 검출이 섞여도 정상 추적되는 보행자의 잔류 카운트는 영향받지 않는다."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=2)
+
+    occ.update([("p1", (25, 5)), (None, (25, 5))])
+    assert occ.update([("p1", (25, 5)), (None, (25, 5))]) == {"p1": 3}

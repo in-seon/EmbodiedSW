@@ -137,8 +137,33 @@ class CrosswalkZones:
             zones = cls._split_on_pixels(corners, n, name)
         return cls(zones, name=name, ground_plane=ground_plane)
 
+    @staticmethod
+    def _check_frame_size(data, expected_frame_size):
+        """캘리브레이션 당시 해상도와 운영 해상도가 같은지 확인한다.
+
+        zone 좌표와 호모그래피는 둘 다 '캘리브레이션 당시 프레임 해상도'에 종속된 픽셀 값이다.
+        운영 해상도가 다르면 좌표가 통째로 어긋나는데, **에러 없이 구역만 엉뚱하게 잡히는**
+        조용한 오작동이라 현장에서 원인을 찾기가 가장 어렵다. zone_calibrator가 frame_size를
+        남겨 두므로, 읽는 쪽에서 비교해 즉시 실패시킨다.
+
+        frame_size가 없는 옛 설정 파일은 검증할 근거가 없으므로 통과시킨다(재캘리브레이션 권장).
+        """
+        saved = data.get("frame_size")
+        if saved is None or expected_frame_size is None:
+            return
+        saved = (int(saved[0]), int(saved[1]))
+        expected = (int(expected_frame_size[0]), int(expected_frame_size[1]))
+        if saved != expected:
+            raise ValueError(
+                f"zone 설정의 캘리브레이션 해상도({saved[0]}x{saved[1]})가 "
+                f"현재 운영 해상도({expected[0]}x{expected[1]})와 다릅니다. "
+                "zone 좌표와 호모그래피가 통째로 어긋나므로 그대로 쓰면 구역 판정이 틀립니다. "
+                "config.CAMERA_RESOLUTION을 캘리브레이션 당시 값으로 되돌리거나, "
+                "tools/zone_calibrator.py 로 현재 해상도에서 다시 캘리브레이션하세요."
+            )
+
     @classmethod
-    def load(cls, path=None):
+    def load(cls, path=None, expected_frame_size=None):
         """zone 설정 JSON을 읽는다.
 
         지원 형식:
@@ -152,10 +177,16 @@ class CrosswalkZones:
 
         'zones' 형식(폴리곤 직접 나열)에는 네 꼭짓점이 없으므로 호모그래피를 만들 수 없다.
         속도를 cm/s로 내려면 'corners' 형식을 써야 한다.
+
+        설정에 'frame_size'가 있으면 expected_frame_size(기본: config.CAMERA_RESOLUTION)와
+        비교해 다르면 ValueError를 낸다 — 해상도가 다르면 좌표가 통째로 어긋나기 때문이다.
         """
         path = path or config.ZONE_CONFIG_PATH
+        if expected_frame_size is None:
+            expected_frame_size = config.CAMERA_RESOLUTION
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        cls._check_frame_size(data, expected_frame_size)
         name = data.get("name", "crosswalk")
         if "corners" in data:
             width_cm = data.get("real_width_cm", config.CROSSWALK_REAL_WIDTH_CM)
@@ -199,14 +230,28 @@ class CrosswalkOccupancy:
             )
         # track_id -> {"count": 연속 프레임 수, "zone": 최근 구역 번호}
         self._state = {}
+        # 직전 update()에서 track_id가 없어 무시한 검출 수 (아래 update 주석 참고).
+        self.untracked_count = 0
 
     def update(self, detections) -> dict:
         """이번 프레임 검출을 반영하고, 확정 보행자의 {track_id: zone_index} 를 반환한다.
 
         detections: (track_id, point) 튜플의 iterable. point는 보통 BoundingBox.foot_point().
+
+        track_id가 None인 검출은 무시한다(SpeedEstimator.update_many와 같은 규칙). 프레임 간
+        대응을 알 수 없는 검출로는 '연속 몇 프레임 잔류했는가'를 셀 수 없기 때문이다. None을
+        키로 쓰면 서로 다른 사람들이 한 카운터에 합쳐져, 같은 프레임 안의 여러 명이 각각
+        카운트를 올리고 마지막 사람의 구역만 남는다 — 잔류 검증이 통째로 무력화된다.
+
+        무시한 개수는 untracked_count로 노출한다. 조용히 놓치면 실측에서 "왜 확정이 안 되지"의
+        원인을 찾을 수 없으므로, 추적이 자주 끊기고 있다는 사실이 보이게 한다.
         """
         seen = set()
+        self.untracked_count = 0
         for track_id, point in detections:
+            if track_id is None:
+                self.untracked_count += 1
+                continue
             zone_index = self.zones.locate(point)
             if zone_index is None:
                 self._state.pop(track_id, None)  # 횡단보도 밖 -> 카운트 리셋
@@ -238,3 +283,4 @@ class CrosswalkOccupancy:
 
     def clear(self):
         self._state.clear()
+        self.untracked_count = 0

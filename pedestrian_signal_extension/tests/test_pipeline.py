@@ -205,3 +205,86 @@ def test_priority_mode_off_while_mobility_aids_are_shelved():
     assert result.priority_mode is False
     # 'wheelchair' 박스는 사람이 아니므로 보행자 목록에도 들어가지 않는다.
     assert [p.track_id for p in result.pedestrians] == [1]
+
+
+# --- 실시간 루프 안전성 (버그 A) ---
+
+def test_does_not_resend_extension_every_frame():
+    """같은 하강 구간에서 제어부로 연장 명령이 반복 전송되면 안 된다.
+
+    process_frame()은 매 프레임 호출된다. 수정 전에는 프레임마다 연장이 누적돼
+    10fps 기준 0.3초 만에 상한(20초)을 소진하고 제어부로 명령을 4번 보냈다.
+    """
+    frames = [[box_at(50, 100, 1)]] * 10          # 3번 구역에 계속 서 있음
+    pipeline = build_pipeline(frames)
+
+    grants = [
+        pipeline.process_frame(None, remaining_time_sec=3, timestamp=i * 0.1).extension_sec
+        for i in range(10)
+    ]
+
+    assert grants == [ZONE_EXT[3]] + [0] * 9
+    assert pipeline.serial_comm.sent == [(5, False)]
+    assert pipeline.state_machine.accumulated_extension_sec == 5
+
+
+def test_extends_again_after_controller_applies_extension():
+    """제어부가 연장을 반영해 잔여시간이 회복되면, 다음 하강에서 다시 연장할 수 있다."""
+    frames = [[box_at(50, 100, 1)]] * 4
+    pipeline = build_pipeline(frames)
+
+    assert pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0).extension_sec == 5
+    assert pipeline.process_frame(None, remaining_time_sec=8, timestamp=0.1).extension_sec == 0
+    assert pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.2).extension_sec == 5
+    assert pipeline.serial_comm.sent == [(5, False), (5, False)]
+
+
+# --- 사이클 경계 (버그 B) ---
+
+def test_begin_new_cycle_resets_extension_budget():
+    """다음 보행 신호 사이클에서는 누적 연장이 초기화돼 다시 연장할 수 있어야 한다.
+
+    수정 전에는 state_machine.reset()을 아무도 호출하지 않아, 한 번 상한을 찍으면
+    그 뒤 모든 사이클에서 영구히 CAPPED였다.
+    """
+    frames = [[box_at(50, 100, 1)]] * 10
+    pipeline = build_pipeline(frames, max_total_sec=5)   # 한 번 연장하면 상한
+
+    assert pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0).extension_sec == 5
+    pipeline.process_frame(None, remaining_time_sec=20, timestamp=0.1)
+    assert pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.2).extension_sec == 0
+
+    pipeline.begin_new_cycle()
+
+    assert pipeline.state_machine.accumulated_extension_sec == 0
+    assert pipeline.process_frame(None, remaining_time_sec=3, timestamp=1.0).extension_sec == 5
+
+
+def test_begin_new_cycle_clears_residency_and_speed_state():
+    """사이클 경계에서는 잔류 카운트와 속도 히스토리도 함께 정리돼야 한다.
+
+    사이클 사이에는 보행자가 실제로 바뀐다. 이전 사이클의 잔류 카운트가 남아 있으면
+    새 사이클의 첫 프레임에서 곧바로 '확정 보행자'가 되어 잔류 검증이 무력화된다.
+    """
+    frames = [[box_at(50, 100, 1)]] * 5
+    pipeline = build_pipeline(frames, confirm_frames=2)
+
+    pipeline.process_frame(None, remaining_time_sec=30, timestamp=0.0)
+    result = pipeline.process_frame(None, remaining_time_sec=30, timestamp=0.1)
+    assert result.pedestrians[0].confirmed is True
+
+    pipeline.begin_new_cycle()
+
+    after = pipeline.process_frame(None, remaining_time_sec=30, timestamp=1.0)
+    assert after.pedestrians[0].confirmed is False   # 잔류 카운트 초기화
+    assert after.pedestrians[0].speed is None        # 속도 히스토리 초기화
+
+
+def test_frame_result_exposes_untracked_count():
+    """추적 ID가 안 붙은 검출 수를 결과에 실어 보낸다 — 추적 불안정을 눈에 보이게."""
+    boxes = [box_at(50, 100, track_id=1), box_at(60, 100, track_id=None)]
+    pipeline = build_pipeline([boxes])
+
+    result = pipeline.process_frame(None, remaining_time_sec=30, timestamp=0.0)
+
+    assert result.untracked_count == 1

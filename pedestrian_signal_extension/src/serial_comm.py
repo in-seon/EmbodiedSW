@@ -38,6 +38,21 @@ class SerialComm:
             "메시지 포맷(config.SERIAL_MESSAGE_FORMAT)이 팀과 합의되지 않아 구현 보류."
         )
 
+    def read_cycle_started(self) -> bool:
+        """새 보행 신호 사이클(녹색 시작)이 시작됐는지 여부.
+
+        신호 사이클의 소유자는 제어부이므로 이 이벤트도 제어부가 알려줘야 한다. 파이가
+        잔여 시간의 증감만 보고 추측하면(예: "시간이 갑자기 늘면 새 사이클") 우리가 방금
+        요청한 연장이 반영된 것과 구분할 수 없다.
+
+        이 값이 없으면 누적 연장이 사이클을 넘어 남아, 한 번 상한을 찍은 뒤로는 영구히
+        연장이 안 된다. 메시지 포맷과 함께 반드시 팀과 합의할 것(docs/team_interface.md).
+        """
+        raise NotImplementedError(
+            "제어부 -> 파이 '새 사이클 시작' 이벤트가 팀과 합의되지 않아 구현 보류. "
+            "이 값이 없으면 누적 연장이 사이클을 넘어 남는다(SignalExtensionPipeline.begin_new_cycle)."
+        )
+
     def send_extend_signal(self, extension_sec: int, priority: bool = False):
         """신호 연장 정보를 아두이노로 전달한다.
 

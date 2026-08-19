@@ -52,6 +52,9 @@ class FrameResult:
     pedestrians: list = field(default_factory=list)  # PedestrianState 목록
     priority_mode: bool = False
     speed_unit: str = "px/s"         # "cm/s"면 호모그래피 적용됨, "px/s"면 실측 치수 미입력
+    # 추적 ID가 붙지 않아 잔류/속도 판정에서 제외한 검출 수. 0이 아닌 값이 계속 나오면
+    # 추적이 불안정하다는 뜻이고, 그만큼 연장 조건을 놓치고 있다는 뜻이다.
+    untracked_count: int = 0
 
 
 class SignalExtensionPipeline:
@@ -66,6 +69,25 @@ class SignalExtensionPipeline:
         self.serial_comm = serial_comm or SerialComm()
         # 호모그래피는 zone 설정에서 함께 만들어진다. 실측 치수가 없으면 None -> 속도가 px/s로 나온다.
         self.speed = speed_estimator or SpeedEstimator(ground_plane=self.zones.ground_plane)
+
+    def begin_new_cycle(self):
+        """새 보행 신호 사이클이 시작될 때 호출 — 사이클 단위 상태를 전부 초기화한다.
+
+        초기화 대상:
+          - 누적 연장(SignalExtensionStateMachine) — 안 지우면 한 번 상한을 찍은 뒤로
+            영구히 CAPPED가 되어 그 다음 사이클부터 연장이 아예 안 된다.
+          - 잔류 카운트(CrosswalkOccupancy) — 사이클이 바뀌면 보행자도 바뀐다. 이전
+            카운트가 남아 있으면 새 사이클 첫 프레임에서 곧바로 '확정'되어 잔류 검증이 무의미해진다.
+          - 속도 히스토리(SpeedEstimator) — 사이클 경계를 가로지르는 변위는 속도가 아니다.
+
+        호출 주체는 제어부다. 잔여 녹색 시간과 마찬가지로 신호 사이클의 소유자가 제어부이므로,
+        "새 녹색 시작" 이벤트가 시리얼 프로토콜에 있어야 한다(docs/team_interface.md 참고).
+        추적 ID(track_id)는 일부러 건드리지 않는다 — 위 세 가지를 지우면 ID가 재사용돼도
+        카운트와 히스토리가 처음부터 다시 쌓이므로 문제가 없고, 추적기 리셋은 비용만 든다.
+        """
+        self.state_machine.reset()
+        self.occupancy.clear()
+        self.speed.clear()
 
     def process_frame(self, frame, remaining_time_sec, timestamp=None) -> FrameResult:
         """한 프레임을 처리해 이번 사이클 연장 시간과 보행자 상태를 반환한다.
@@ -119,6 +141,7 @@ class SignalExtensionPipeline:
             pedestrians=pedestrians,
             priority_mode=priority_mode,
             speed_unit=self.speed.unit,
+            untracked_count=self.occupancy.untracked_count,
         )
 
     def run(self):
@@ -130,5 +153,8 @@ class SignalExtensionPipeline:
             )
         with self.camera, self.serial_comm:
             for frame in self.camera.frames():
-                remaining = self.serial_comm.read_remaining_time()  # 제어부가 소유하는 값
+                # 사이클 경계와 잔여 시간 모두 제어부가 소유하는 값이다.
+                if self.serial_comm.read_cycle_started():
+                    self.begin_new_cycle()
+                remaining = self.serial_comm.read_remaining_time()
                 self.process_frame(frame, remaining)
