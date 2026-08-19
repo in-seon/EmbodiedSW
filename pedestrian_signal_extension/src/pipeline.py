@@ -11,8 +11,9 @@
       -> SignalExtensionStateMachine.evaluate()  점유 구역으로 연장 시간 결정
       -> SerialComm.send_extend_signal()      제어부로 전송
 
-속도는 지금 계산·노출만 하고 연장 결정에는 쓰지 않는다(config.USE_SPEED_FOR_EXTENSION = False,
-CLAUDE.md 2.3). 실측으로 안정성을 검증한 뒤 반영 여부를 정한다.
+속도 반영은 config.USE_SPEED_FOR_EXTENSION으로 켜고 끈다(기본 False, CLAUDE.md 2.3).
+켜면 구역별 연장 시간이 '상한'이 되고, 실제 연장은 그 사람이 정말 모자란 만큼으로 줄어든다.
+끄면 지금까지처럼 구역 규칙만 쓴다 — 켜고 끄는 것 외에 다른 동작 차이는 없다.
 
 주의: 잔여 녹색 시간(remaining_time_sec)의 소유자는 제어부다. 통신 프로토콜이 확정되면
 SerialComm.read_remaining_time()으로 읽어 넣는다. 프로토콜이 미정인 지금은 SerialComm 생성이
@@ -26,7 +27,7 @@ from config import config
 from src.capture import CameraCapture
 from src.detection import PersonDetector
 from src.serial_comm import SerialComm
-from src.signal_extend import SignalExtensionStateMachine
+from src.signal_extend import Occupant, SignalExtensionStateMachine
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
 
@@ -127,9 +128,16 @@ class SignalExtensionPipeline:
             for track_id, foot_point in detections
         ]
 
+        # 확정 보행자마다 (구역, 예상 통과 시간)을 실어 보낸다. 속도 반영이 꺼져 있거나
+        # ETA가 None이면 상태 머신이 구역 규칙만으로 판단한다(안전한 폴백).
+        occupants = [
+            Occupant(zone=zone, eta_sec=self.speed.estimated_crossing_time_sec(track_id))
+            for track_id, zone in confirmed.items()
+        ]
+
         extension_sec = self.state_machine.evaluate(
             remaining_time_sec=remaining_time_sec,
-            occupied_zones=occupied,
+            occupants=occupants,
             priority_mode=priority_mode,
         )
         if extension_sec > 0:
@@ -146,11 +154,6 @@ class SignalExtensionPipeline:
 
     def run(self):
         """실시간 루프. 제어부 통신 프로토콜 확정 후 사용."""
-        if config.USE_SPEED_FOR_EXTENSION:
-            raise NotImplementedError(
-                "USE_SPEED_FOR_EXTENSION이 켜져 있지만 속도 기반 연장 규칙은 아직 구현되지 않았습니다. "
-                "속도 추정 정확도를 실측 검증하고 팀과 규칙을 확정한 뒤 구현하세요 (CLAUDE.md 2.3, 6)."
-            )
         with self.camera, self.serial_comm:
             for frame in self.camera.frames():
                 # 사이클 경계와 잔여 시간 모두 제어부가 소유하는 값이다.

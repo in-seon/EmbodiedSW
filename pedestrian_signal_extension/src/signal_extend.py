@@ -12,9 +12,28 @@ CLAUDE.md 2.3, 2.4 + 담당 파트 설계:
 보행자가 있는 구역의 연장 시간이 아직 None(미확정)이면 evaluate 시점에 실패한다.
 """
 
+import math
+from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Optional
 
 from config import config
+
+
+@dataclass(frozen=True)
+class Occupant:
+    """연장 판단에 넣는 '확정 보행자 한 명'.
+
+    zone     : 점유 중인 구역 번호(1..N).
+    eta_sec  : 진행 방향 기준 예상 통과 시간(초). 다음 경우 None이고, 그러면 이 사람은
+               구역 규칙만으로 판단한다(안전한 폴백).
+                 - 호모그래피 없음(실측 치수 미입력) -> 속도가 px/s라 초로 환산 불가
+                 - 정지 중이라 진행 방향을 못 냄
+                 - 아직 속도 샘플이 부족함
+    """
+
+    zone: int
+    eta_sec: Optional[float] = None
 
 
 class SignalState(Enum):
@@ -32,6 +51,8 @@ class SignalExtensionStateMachine:
         max_total_extension_sec=None,
         priority_zone_extension_sec=None,
         priority_max_total_extension_sec=None,
+        use_speed=None,
+        eta_safety_margin=None,
     ):
         self.remaining_time_threshold_sec = (
             remaining_time_threshold_sec
@@ -60,6 +81,22 @@ class SignalExtensionStateMachine:
             else config.PRIORITY_MAX_TOTAL_EXTENSION_SEC
         )
 
+        # 속도(ETA) 반영 여부와 안전계수 (CLAUDE.md 2.3, config.USE_SPEED_FOR_EXTENSION).
+        self.use_speed = (
+            use_speed if use_speed is not None else config.USE_SPEED_FOR_EXTENSION
+        )
+        self.eta_safety_margin = (
+            eta_safety_margin
+            if eta_safety_margin is not None
+            else config.ETA_SAFETY_MARGIN
+        )
+        if self.use_speed and self.eta_safety_margin is None:
+            raise NotImplementedError(
+                "USE_SPEED_FOR_EXTENSION이 켜져 있는데 ETA_SAFETY_MARGIN이 설정되지 않았습니다. "
+                "속도 추정이 실제보다 빠르면 연장을 덜 주게 되고 그건 보행자가 도로에 갇힌다는 뜻이므로, "
+                "안전계수를 임의값으로 두지 않습니다. config에 값을 채워주세요."
+            )
+
         if self.remaining_time_threshold_sec is None or self.max_total_extension_sec is None:
             raise NotImplementedError(
                 "REMAINING_TIME_THRESHOLD_SEC / MAX_TOTAL_EXTENSION_SEC가 설정되지 않았습니다. "
@@ -84,12 +121,52 @@ class SignalExtensionStateMachine:
             )
         return sec
 
-    def evaluate(self, remaining_time_sec, occupied_zones, priority_mode=False) -> int:
+    def _need_for(self, occupant, remaining_time_sec, ext_map) -> int:
+        """이 보행자 한 명에게 필요한 연장 시간(초).
+
+        속도를 쓰지 않거나 ETA가 없으면 구역 규칙 값을 그대로 쓴다.
+
+        속도를 쓸 때는 **구역 값이 상한**이고, 실제로 모자란 만큼으로 깎는다:
+
+            부족분 = ETA x 안전계수 - 남은 신호 시간
+            필요량 = min(구역 값, ceil(부족분))
+
+        핵심은 ETA가 아니라 '부족분'과 비교한다는 것이다. 판단 시점에 보행자에게는 이미
+        remaining_time_sec 만큼의 시간이 있으므로, ETA가 7초여도 5초가 남아 있으면
+        정말 필요한 건 2초다. 부족분이 0 이하면 제시간에 다 건너므로 연장하지 않는다.
+
+        올림(ceil)과 안전계수를 쓰는 이유: 과대 연장은 차량이 좀 더 기다리는 것이지만
+        과소 연장은 보행자가 도로에 갇히는 것이다. 위험이 비대칭이므로 넉넉한 쪽으로 튼다.
+        """
+        zone_sec = self._extension_for_zone(ext_map, occupant.zone)
+        if zone_sec <= 0:
+            # 양 끝 구역 — ETA와 무관하게 연장하지 않는다(설계상 확정 규칙).
+            return 0
+        if not self.use_speed or occupant.eta_sec is None:
+            return zone_sec
+        shortfall = occupant.eta_sec * self.eta_safety_margin - remaining_time_sec
+        if shortfall <= 0:
+            return 0
+        return min(zone_sec, math.ceil(shortfall))
+
+    @staticmethod
+    def _as_occupant(item) -> Occupant:
+        """구역 번호(int)만 넘어와도 받아준다 — ETA 없음으로 해석."""
+        if isinstance(item, Occupant):
+            return item
+        return Occupant(zone=item)
+
+    def evaluate(self, remaining_time_sec, occupants, priority_mode=False) -> int:
         """이번 사이클에 추가할 연장 시간(초)을 반환한다. 연장하지 않으면 0.
 
-        remaining_time_sec: 아두이노가 알려주는 현재 잔여 녹색 시간(초).
-        occupied_zones: 확정 보행자들이 점유 중인 구역 번호 목록(1..N). 비어 있으면 보행자 없음.
+        remaining_time_sec: 제어부가 알려주는 현재 잔여 녹색 시간(초).
+        occupants: 확정 보행자 목록. Occupant(zone, eta_sec) 또는 구역 번호(int)의 iterable.
+                   비어 있으면 보행자 없음.
         priority_mode: 교통약자 감지 시 True. 우선 연장 맵/상한이 설정돼 있으면 그쪽을 쓴다.
+
+        여러 명이면 **사람마다 따로 필요량을 계산해 가장 큰 값**에 맞춘다. 속도를 쓰기 시작하면
+        "가운데 있는 사람이 가장 오래 걸린다"는 가정이 깨지기 때문이다 — 가운데 사람이 빠르고
+        가장자리 사람이 느릴 수 있고, 그때 가운데만 보면 느린 쪽을 도로에 가두게 된다.
         """
         # 우선 연장 규칙이 설정돼 있으면 그것을, 아니면 일반 규칙을 사용 (미정이면 일반 규칙으로 안전하게 대체).
         ext_map = (
@@ -119,15 +196,16 @@ class SignalExtensionStateMachine:
             self.state = SignalState.EXTENDED
             return 0
 
-        zones = [z for z in occupied_zones if z is not None]
-        if not zones:
+        people = [self._as_occupant(o) for o in occupants if o is not None]
+        people = [p for p in people if p.zone is not None]
+        if not people:
             self.state = SignalState.NORMAL
             return 0
 
-        # 가장 많이 필요한 사람(연장 시간이 가장 큰 구역)에 맞춘다.
-        desired = max(self._extension_for_zone(ext_map, z) for z in zones)
+        # 가장 많이 필요한 사람에 맞춘다.
+        desired = max(self._need_for(p, remaining_time_sec, ext_map) for p in people)
         if desired <= 0:
-            # 양 끝 구역(1/5)만 점유 -> 연장 안 함.
+            # 양 끝 구역(1/5)만 점유했거나, 모두 제시간에 건널 수 있음 -> 연장 안 함.
             self.state = SignalState.NORMAL
             return 0
 

@@ -288,3 +288,70 @@ def test_frame_result_exposes_untracked_count():
     result = pipeline.process_frame(None, remaining_time_sec=30, timestamp=0.0)
 
     assert result.untracked_count == 1
+
+
+# --- 속도(ETA) 반영 연장: 파이프라인 end-to-end ---
+
+def build_speed_pipeline(frames, margin=1.0, threshold_sec=5, max_total_sec=10):
+    """속도 반영을 켠 파이프라인. 속도는 실제 SpeedEstimator가 프레임에서 계산한다."""
+    zones = CrosswalkZones.from_quad(CORNERS, n=5, width_cm=WIDTH_CM, length_cm=LENGTH_CM)
+    return SignalExtensionPipeline(
+        camera=object(),
+        detector=FakeDetector(frames),
+        zones=zones,
+        occupancy=CrosswalkOccupancy(zones, confirm_frames=1),
+        state_machine=SignalExtensionStateMachine(
+            remaining_time_threshold_sec=threshold_sec,
+            zone_extension_sec=ZONE_EXT,
+            max_total_extension_sec=max_total_sec,
+            use_speed=True,
+            eta_safety_margin=margin,
+        ),
+        serial_comm=FakeSerial(),
+        speed_estimator=SpeedEstimator(
+            ground_plane=GroundPlane.from_quad(CORNERS, WIDTH_CM, LENGTH_CM),
+            window_sec=10.0,
+        ),
+    )
+
+
+def test_slow_pedestrian_gets_extension_sized_to_measured_need():
+    """실제로 측정된 속도로 필요한 만큼만 연장한다.
+
+    평면 y=40cm -> 50cm 를 1초에 이동 = 10cm/s. 남은 거리 50cm -> ETA 5초.
+    잔여 5초, 안전계수 1.0 -> 부족분 0 -> 연장 없음.
+    """
+    frames = [[box_at(50, 80, 1)], [box_at(50, 100, 1)]]   # 픽셀 y 80->100 = 평면 40->50cm
+    pipeline = build_speed_pipeline(frames)
+
+    # 첫 프레임은 시간이 넉넉한 시점 — 속도 샘플만 쌓고 연장 판단은 하지 않는다.
+    pipeline.process_frame(None, remaining_time_sec=30, timestamp=0.0)
+    result = pipeline.process_frame(None, remaining_time_sec=5, timestamp=1.0)
+
+    assert result.pedestrians[0].crossing_time_sec == pytest.approx(5.0)
+    assert result.extension_sec == 0
+    assert pipeline.serial_comm.sent == []
+
+
+def test_very_slow_pedestrian_gets_partial_extension():
+    """같은 위치라도 절반 속도(5cm/s)면 ETA 10초 -> 부족분 5초 -> 구역 상한 5초까지 연장."""
+    frames = [[box_at(50, 90, 1)], [box_at(50, 100, 1)]]   # 45 -> 50cm, 1초 = 5cm/s
+    pipeline = build_speed_pipeline(frames)
+
+    pipeline.process_frame(None, remaining_time_sec=30, timestamp=0.0)
+    result = pipeline.process_frame(None, remaining_time_sec=5, timestamp=1.0)
+
+    assert result.pedestrians[0].crossing_time_sec == pytest.approx(10.0)
+    assert result.extension_sec == 5
+    assert pipeline.serial_comm.sent == [(5, False)]
+
+
+def test_speed_pipeline_falls_back_to_zone_rule_without_eta():
+    """첫 프레임은 속도 샘플이 부족해 ETA가 없다 -> 구역 규칙(5초)으로 폴백."""
+    frames = [[box_at(50, 100, 1)]]
+    pipeline = build_speed_pipeline(frames)
+
+    result = pipeline.process_frame(None, remaining_time_sec=5, timestamp=0.0)
+
+    assert result.pedestrians[0].crossing_time_sec is None
+    assert result.extension_sec == 5
