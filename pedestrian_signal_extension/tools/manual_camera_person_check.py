@@ -34,7 +34,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config
 from src.capture import CameraCapture
-from src.detection import PersonDetector
+from src.detection import MobilityAidDetector, PersonDetector
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
 
@@ -42,7 +42,21 @@ GREEN = (0, 255, 0)
 YELLOW = (0, 255, 255)
 RED = (0, 0, 255)
 WHITE = (255, 255, 255)
+MAGENTA = (255, 0, 255)   # 교통약자 보조 검출 결과
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+def _is_still_image(source) -> bool:
+    """정지 이미지 경로인가. 맞으면 한 장을 붙들고 반복 표시한다.
+
+    후보 가중치가 우리 휠체어 모형을 잡는지 사진 한 장으로 확인할 때 쓴다.
+    cv2.VideoCapture는 이미지 파일을 한 번만 돌려주고 그다음엔 None이라, 이 처리가 없으면
+    창이 뜨자마자 닫힌다.
+    """
+    return isinstance(source, str) and Path(source).suffix.lower() in _IMAGE_SUFFIXES
 
 
 def _load_zones(use_zones):
@@ -87,6 +101,14 @@ def main():
     parser.add_argument("--confirm-frames", type=int, default=config.ZONE_RESIDENCY_FRAMES or 3,
                         help="'확정 보행자'로 보기까지 필요한 연속 검출 프레임 수. "
                              "config.ZONE_RESIDENCY_FRAMES가 아직 미정이라 화면 확인용 기본값 3을 쓴다.")
+    parser.add_argument("--aid-model", default=config.MOBILITY_AID_MODEL_PATH,
+                        help="교통약자(휠체어/목발) 보조 모델 가중치 경로. "
+                             "주면 자주색 박스로 함께 표시한다. 후보 가중치가 우리 모형을 "
+                             "실제로 잡는지 확인하는 용도.")
+    parser.add_argument("--aid-every", type=int, default=config.MOBILITY_AID_EVERY_N_FRAMES,
+                        help="보조 모델 추론 주기(프레임). 1이면 매 프레임(비쌈).")
+    parser.add_argument("--aid-conf", type=float, default=config.MOBILITY_AID_CONFIDENCE_THRESHOLD,
+                        help="보조 모델 신뢰도 임계값. 모형이 안 잡히면 낮춰가며 확인.")
     args = parser.parse_args()
 
     try:
@@ -99,6 +121,23 @@ def main():
     occupancy = CrosswalkOccupancy(zones, confirm_frames=args.confirm_frames) if zones else None
     speed = SpeedEstimator(ground_plane=ground_plane)
     detector = PersonDetector()
+    print(f"[안내] 사람 검출 모델: {detector.model_path} (imgsz={detector.imgsz}, "
+          f"conf={detector.confidence_threshold})")
+
+    # 교통약자 보조 모델. 경로가 없으면 enabled=False로 조용히 비활성된다.
+    aid = MobilityAidDetector(model_path=args.aid_model, every_n_frames=max(1, args.aid_every),
+                              confidence_threshold=args.aid_conf)
+    if aid.enabled:
+        print(f"[안내] 교통약자 보조 모델: {aid.model_path} "
+              f"({args.aid_every}프레임마다 1회, imgsz={aid.imgsz}, conf={aid.confidence_threshold})")
+        print(f"       이 모델이 아는 클래스: {aid.class_names}")
+        print("       * 자주색 박스가 보조 모델 결과다. 휠체어/목발 모형을 화면에 넣고 "
+              "잡히는지 확인할 것.")
+        if not config.MOBILITY_AID_LABELS:
+            print("       * config.MOBILITY_AID_LABELS가 비어 있어 모델의 모든 클래스를 표시한다. "
+                  "쓸 클래스명을 확인한 뒤 config에 채우면 된다.")
+    else:
+        print("[안내] 교통약자 보조 모델 없음 (--aid-model 또는 config.MOBILITY_AID_MODEL_PATH로 지정).")
 
     # 카메라 여는 로직은 src/capture.py 한 곳에 있다.
     # 파이 CSI 카메라는 --source picamera2, 그 외(USB 웹캠/영상/스트림)는 cv2가 처리한다.
@@ -108,21 +147,33 @@ def main():
     print("카메라 창에서 'q'를 누르면 종료합니다.")
     fps_t0, fps_frames, fps = time.monotonic(), 0, 0.0
 
+    still = None          # 정지 이미지 소스면 첫 프레임을 붙들고 반복한다(모형 사진 확인용)
     while True:
-        frame = camera.read_frame()
+        frame = still if still is not None else camera.read_frame()
         if frame is None:
             print("프레임을 읽을 수 없습니다.")
             break
+        if still is None and _is_still_image(source):
+            still = frame
+        frame = frame.copy() if still is not None else frame
 
         now = time.monotonic()
         boxes = [b for b in detector.detect(frame) if b.is_pedestrian()]
         detections = [(b.track_id, b.foot_point()) for b in boxes]
+
+        # 교통약자 보조 검출 (저빈도). 비활성이면 빈 목록.
+        aid_boxes = aid.detect(frame)
 
         confirmed = occupancy.update(detections) if occupancy else {}
         speeds = speed.update_many(detections, now)
 
         if zones is not None:
             _draw_zones(frame, zones)
+
+        for ab in aid_boxes:
+            cv2.rectangle(frame, (int(ab.x1), int(ab.y1)), (int(ab.x2), int(ab.y2)), MAGENTA, 2)
+            cv2.putText(frame, f"{ab.label} {ab.confidence:.2f}",
+                        (int(ab.x1), max(int(ab.y1) - 6, 12)), FONT, 0.5, MAGENTA, 2)
 
         for box in boxes:
             fx, fy = box.foot_point()
@@ -160,8 +211,13 @@ def main():
             fps = fps_frames / (now - fps_t0)
             fps_t0, fps_frames = now, 0
         # 라즈베리파이 실측 FPS는 이 값으로 확인한다 (CLAUDE.md 2.6 — 추정치 기록 금지).
-        cv2.putText(frame, f"FPS {fps:.1f} | {camera.backend_name} | unit {speed.unit}",
-                    (10, 22), FONT, 0.6, WHITE, 2)
+        hud = f"FPS {fps:.1f} | {camera.backend_name} | unit {speed.unit}"
+        if aid.enabled:
+            hud += f" | aid {len(aid_boxes)} (x{aid.inference_count})"
+        cv2.putText(frame, hud, (10, 22), FONT, 0.6, WHITE, 2)
+        if aid_boxes:
+            cv2.putText(frame, "PRIORITY (mobility aid detected)", (10, 44),
+                        FONT, 0.6, MAGENTA, 2)
 
         cv2.imshow("Detection + Zone + Speed (q: quit)", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):

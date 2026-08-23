@@ -26,6 +26,10 @@ class BoundingBox:
     confidence: float
     label: str                     # config.PEDESTRIAN_LABEL 또는 config.MOBILITY_AID_LABELS 중 하나(모델 클래스명과 일치).
     track_id: Optional[int] = None  # 추적 ID. YOLO track()이 부여. 없으면 None.
+    # COCO 17개 관절의 (x, y, conf) 배열. 포즈 가중치(yolov8n-pose.pt)일 때만 채워진다.
+    # 목표 2(쓰러짐 감지)가 몸통 각도를 재는 데 쓴다 — src/fall_detection.py 참고.
+    # 일반 검출 가중치면 None이고, 그때 쓰러짐 판정은 bbox 가로/세로 비율로 폴백한다.
+    keypoints: object = None
 
     def foot_point(self):
         """발 위치 = bounding box 하단 모서리의 중심. 위치 판정·속도 추정의 기준점.
@@ -38,18 +42,13 @@ class BoundingBox:
         return ((self.x1 + self.x2) / 2, self.y2)
 
     def center_point(self):
-        """박스 중심. 지면 위치 판정에는 쓰지 말 것(위 foot_point 주석 참고).
+        """박스 중심. **지면 위치 판정에는 쓰지 말 것**(위 foot_point 주석 참고).
 
-        목표 2(쓰러짐 감지)처럼 지면 좌표가 필요 없는 용도로만 사용한다.
+        지면 좌표가 필요 없는 용도로만 쓴다. 현재 실사용처는 없고,
+        tests/test_pipeline.py::test_uses_foot_point_not_center_for_zone 이
+        "발 위치를 쓰지 중심점을 쓰지 않는다"는 설계 결정을 이 값과 대조해 고정한다.
         """
         return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-
-    def aspect_ratio(self):
-        """박스 가로/세로 비. 목표 2(쓰러짐 감지)가 자세 판단에 쓸 수 있도록 노출한다."""
-        height = self.y2 - self.y1
-        if height <= 0:
-            return None
-        return (self.x2 - self.x1) / height
 
     def is_pedestrian(self) -> bool:
         return self.label == config.PEDESTRIAN_LABEL
@@ -76,7 +75,7 @@ class PersonDetector:
     교체하더라도 이 시그니처가 유지되므로 zone/speed/signal_extend 쪽은 손댈 필요가 없다.
     """
 
-    def __init__(self, model_path=None, confidence_threshold=None, tracker=None):
+    def __init__(self, model_path=None, confidence_threshold=None, tracker=None, imgsz=None):
         self.model_path = model_path or config.DETECTION_MODEL_PATH
         self.confidence_threshold = (
             confidence_threshold
@@ -84,6 +83,9 @@ class PersonDetector:
             else config.DETECTION_CONFIDENCE_THRESHOLD
         )
         self.tracker = tracker or config.DETECTION_TRACKER
+        # 추론 입력 해상도. 프레임 해상도(CAMERA_RESOLUTION)와 다른 값이며, 이걸 줄여도
+        # 박스는 원본 프레임 좌표로 돌아오므로 zone/호모그래피 재캘리브레이션이 필요 없다.
+        self.imgsz = imgsz if imgsz is not None else config.DETECTION_IMGSZ
         if self.model_path is None:
             raise NotImplementedError(
                 "DETECTION_MODEL_PATH가 설정되지 않았습니다. config에 가중치 경로를 채워주세요."
@@ -123,6 +125,7 @@ class PersonDetector:
             conf=self.confidence_threshold,
             classes=self._class_ids,
             tracker=self.tracker,
+            imgsz=self.imgsz,
             verbose=False,
         )[0]
 
@@ -130,16 +133,26 @@ class PersonDetector:
         if results.boxes is None:
             return boxes
 
-        for box in results.boxes:
+        # 포즈 가중치면 같은 추론 결과에 키포인트가 함께 들어 있다. 추론을 한 번 더 돌리지
+        # 않고 그대로 실어 보내, 목표 1(신호 연장)과 목표 2(쓰러짐)가 추론을 공유하게 한다.
+        keypoints = None
+        if getattr(results, "keypoints", None) is not None:
+            keypoints = results.keypoints.data
+            if hasattr(keypoints, "cpu"):
+                keypoints = keypoints.cpu().numpy()
+
+        for index, box in enumerate(results.boxes):
             x1, y1, x2, y2 = (float(v) for v in box.xyxy[0])
             label = self._class_names[int(box.cls[0])]
             track_id = int(box.id[0]) if box.id is not None else None
+            kp = keypoints[index] if keypoints is not None and index < len(keypoints) else None
             boxes.append(
                 BoundingBox(
                     x1=x1, y1=y1, x2=x2, y2=y2,
                     confidence=float(box.conf[0]),
                     label=label,
                     track_id=track_id,
+                    keypoints=kp,
                 )
             )
         return boxes
@@ -151,3 +164,103 @@ class PersonDetector:
             if trackers:
                 for tracker in trackers:
                     tracker.reset()
+
+
+class MobilityAidDetector:
+    """교통약자(휠체어/목발/지팡이) 보조 검출기 — 별도 가중치를 저빈도로 돌린다.
+
+    사람 검출과 분리한 이유는 단순하다: COCO에도 yolov8n-pose에도 해당 클래스가 없어
+    같은 모델로는 못 잡는다(CLAUDE.md 2.5).
+
+    **매 프레임 돌리지 않는다.** 추론이 프레임 시간의 사실상 전부라 두 모델을 매 프레임
+    돌리면 FPS가 반토막 나는데, "이 사람이 휠체어를 탔는가"는 위치·속도와 달리
+    프레임마다 바뀌는 값이 아니다. every_n_frames 마다 한 번만 추론하고 그 사이에는
+    직전 결과를 그대로 돌려준다(값이 깜빡이지 않게).
+
+    가중치가 없으면(config.MOBILITY_AID_MODEL_PATH is None) 조용히 비활성 상태가 되어
+    항상 빈 목록을 돌려준다 — 보류 중인 기능이 나머지를 막지 않게 하기 위함이다.
+    """
+
+    def __init__(self, model_path=None, confidence_threshold=None, imgsz=None,
+                 every_n_frames=None, labels=None):
+        self.model_path = model_path or config.MOBILITY_AID_MODEL_PATH
+        self.confidence_threshold = (
+            confidence_threshold
+            if confidence_threshold is not None
+            else config.MOBILITY_AID_CONFIDENCE_THRESHOLD
+        )
+        self.imgsz = imgsz if imgsz is not None else config.MOBILITY_AID_IMGSZ
+        self.every_n_frames = (
+            every_n_frames if every_n_frames is not None
+            else config.MOBILITY_AID_EVERY_N_FRAMES
+        )
+        self._wanted = tuple(labels) if labels is not None else tuple(config.MOBILITY_AID_LABELS)
+        self._frame_count = 0
+        self._cached = []
+        self.inference_count = 0
+
+        self._model = None
+        self._class_names = {}
+        self._class_ids = None
+        if self.model_path is not None:
+            self._model = self._load_model(self.model_path)
+            self._class_names = self._model.names
+            # 라벨을 지정하지 않으면 모델이 아는 클래스를 전부 쓴다 — 후보 가중치를
+            # 처음 시험할 때 클래스명을 몰라도 바로 돌려볼 수 있게.
+            if self._wanted:
+                self._class_ids = sorted(
+                    idx for idx, name in self._class_names.items() if name in self._wanted
+                )
+                if not self._class_ids:
+                    raise ValueError(
+                        f"모델 {self.model_path}에 {list(self._wanted)} 클래스가 없습니다. "
+                        f"모델이 아는 클래스: {sorted(self._class_names.values())}. "
+                        "config.MOBILITY_AID_LABELS를 확인하세요(비워 두면 전체 클래스를 씁니다)."
+                    )
+
+    @property
+    def enabled(self) -> bool:
+        return self._model is not None
+
+    @property
+    def class_names(self) -> dict:
+        """모델이 아는 클래스 {인덱스: 이름}. 후보 가중치 확인용."""
+        return dict(self._class_names)
+
+    def _load_model(self, model_path):
+        from ultralytics import YOLO   # 지연 임포트 (PersonDetector와 같은 이유)
+
+        return YOLO(model_path)
+
+    def detect(self, frame) -> list[BoundingBox]:
+        """교통약자 클래스 BoundingBox 목록. 추론을 건너뛴 프레임에서는 직전 결과를 준다.
+
+        track_id는 붙이지 않는다(track()이 아니라 predict()). 이 검출은 '있냐 없냐'만
+        쓰이고, 사람과의 연결이 필요해지면 사람 박스와의 겹침으로 잇는 편이 낫다.
+        """
+        if self._model is None:
+            return []
+        if self._frame_count % self.every_n_frames != 0:
+            self._frame_count += 1
+            return self._cached
+        self._frame_count += 1
+        self.inference_count += 1
+
+        kwargs = dict(conf=self.confidence_threshold, imgsz=self.imgsz, verbose=False)
+        if self._class_ids:
+            kwargs["classes"] = self._class_ids
+        results = self._model.predict(frame, **kwargs)[0]
+
+        boxes = []
+        if results.boxes is not None:
+            for box in results.boxes:
+                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0])
+                boxes.append(
+                    BoundingBox(
+                        x1=x1, y1=y1, x2=x2, y2=y2,
+                        confidence=float(box.conf[0]),
+                        label=self._class_names[int(box.cls[0])],
+                    )
+                )
+        self._cached = boxes
+        return boxes

@@ -92,6 +92,12 @@ CROSSWALK_REAL_LENGTH_CM = None  # TODO(실측 필요): 횡단보도(모형) 길
 SPEED_WINDOW_SEC = 0.5
 
 # 위 윈도우 안에 최소 이만큼 샘플이 쌓여야 속도를 낸다(그 전엔 None 반환).
+#
+# 2를 유지할 것. 속도 계산은 히스토리의 **양 끝 샘플만** 쓰므로(src/speed.py) 이 값을 늘려도
+# 정확도가 좋아지지 않고, 첫 속도가 나오는 시점만 늦어진다. 게다가 SPEED_WINDOW_SEC(0.5초)
+# 안에 N개가 쌓이려면 최소 (N-1)/0.5 fps가 필요해서, 3으로 두면 4fps 미만인 보드에서
+# 속도가 영원히 None이 되고 ETA 기반 연장이 조용히 꺼진다.
+# 노이즈를 줄이려면 이 값이 아니라 SPEED_WINDOW_SEC를 늘릴 것.
 SPEED_MIN_SAMPLES = 2
 
 # 계산된 속도를 신호 연장 시간 결정에 반영할지 여부.
@@ -130,16 +136,58 @@ ETA_SAFETY_MARGIN = 1.25
 # -> 추가 파인튜닝 없이 사전학습 가중치를 그대로 쓴다.
 PEDESTRIAN_LABEL = "person"     # COCO 클래스명. 파인튜닝 모델로 교체하면 그 클래스명으로 바꾼다.
 
-# 교통약자(휠체어/목발/지팡이)는 현재 "보류" (CLAUDE.md 2.5).
-# COCO에 해당 클래스가 없어 검출 수단 자체가 없으므로 빈 튜플로 두어 priority_mode가 항상 False가 되게 한다.
-# 파인튜닝 모델이 생기면 ("wheelchair", "cane", "crutches") 처럼 학습 클래스명을 채운다.
+# --- 교통약자(휠체어/목발/지팡이) 보조 검출 — CLAUDE.md 2.5 ---
+# 사람 검출과 같은 모델로는 못 잡는다(COCO에도 yolov8n-pose에도 해당 클래스가 없다).
+# 그래서 **별도 가중치를 쓰는 두 번째 모델**로 처리한다.
+#
+# 왜 모델 두 개를 감수하는가:
+#   추론이 프레임 시간의 사실상 전부라(실측 약 4,400:1) 매 프레임 두 번 돌리면 FPS가 반토막 난다.
+#   하지만 "이 사람이 휠체어를 탔는가"는 위치·속도와 달리 **프레임마다 바뀌는 값이 아니다.**
+#   그래서 MOBILITY_AID_EVERY_N_FRAMES 마다 한 번만 추론하고 그 사이엔 직전 결과를 재사용한다.
+#   10fps에서 10프레임마다면 추가 비용이 약 +10%, imgsz까지 낮추면 훨씬 적다.
+#
+# 가중치는 아직 미정이다. 채우기 전에 **반드시 먼저 확인할 것**:
+#   공개 휠체어 데이터셋은 대개 '실제 사람/실제 휠체어' 사진으로 학습돼 있어
+#   축소 모형(장난감 휠체어)은 아예 못 잡을 수 있다. 투자하기 전에
+#   `python tools/manual_camera_person_check.py --source 모형사진.jpg --aid-model 후보.pt`
+#   로 우리 모형에서 실제로 잡히는지부터 볼 것.
+MOBILITY_AID_MODEL_PATH = None   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
+
+# 위 모델이 아는 클래스명 중 '교통약자'로 볼 것들. 모델마다 이름이 다르므로
+# `YOLO(경로).names` 로 확인한 뒤 채운다. 비어 있으면 모델이 아는 클래스를 전부 쓴다.
 MOBILITY_AID_LABELS = ()
 
-DETECTION_MODEL_PATH = "yolov8n.pt"   # ultralytics가 없으면 최초 실행 시 자동 다운로드(약 6MB).
-DETECTION_CONFIDENCE_THRESHOLD = 0.5  # 사람 모형 관측치 80%대 대비 여유 있는 값. 오탐 발생 시 조정.
+# 보조 모델 추론 주기(프레임). 1이면 매 프레임(비쌈). 위 설명 참고.
+MOBILITY_AID_EVERY_N_FRAMES = 10
+
+# 보조 모델 전용 추론 파라미터. "있냐 없냐"만 알면 되므로 사람 검출보다 작게 잡아도 된다.
+MOBILITY_AID_IMGSZ = 320
+# 지팡이(cane)는 사선·저해상도에서 매우 작게 보여 검출률이 낮다(CLAUDE.md 2.5).
+# 놓치는 쪽이 더 나쁘므로 사람 검출보다 낮은 임계값에서 출발하고, 오탐이 잦으면 올린다.
+MOBILITY_AID_CONFIDENCE_THRESHOLD = 0.3
+
+# 포즈 가중치. 목표 1(신호 연장)과 목표 2(쓰러짐 감지)가 **추론 1회를 공유**하기 위한 선택이다.
+# yolov8n-pose는 클래스가 {0: "person"} 하나뿐이지만 사람 박스와 COCO 17관절 키포인트를
+# 함께 주므로, 신호 연장은 박스를, 쓰러짐 감지는 키포인트를 쓰면 된다.
+# 두 모델을 각각 돌리면 추론 비용이 2배가 되고, 그게 프레임 시간의 사실상 전부다.
+# (docs/decisions.md "2026-08-19: 검출 모델을 yolov8n-pose로 교체" 참고)
+DETECTION_MODEL_PATH = "yolov8n-pose.pt"  # 없으면 최초 실행 시 자동 다운로드(약 6.5MB).
+
+# ⚠️ 두 목표가 추론을 공유하므로 임계값도 하나를 공유한다. 팀원 PoC는 0.4, 목표 1은 0.5였다.
+# 낮은 쪽(0.4)을 택했다: 넘어지는 순간에는 bbox가 급변하고 신뢰도가 떨어져 검출이 빠지는데
+# (팀원이 UR Fall 실측에서 확인), 쓰러진 사람을 놓치는 것이 연장 오탐보다 훨씬 위험하다.
+# 목표 1의 사람 모형 관측치가 80%대였으므로 0.4도 충분히 여유가 있다. 팀 확인 대상.
+DETECTION_CONFIDENCE_THRESHOLD = 0.4
 
 # YOLO 추적기 설정. track_id가 있어야 SpeedEstimator와 CrosswalkOccupancy가 사람별로 구분할 수 있다.
 DETECTION_TRACKER = "bytetrack.yaml"  # ultralytics 내장 추적기. 필요 시 "botsort.yaml"로 교체.
+
+# 추론 입력 해상도. **CAMERA_RESOLUTION과 다른 값이다.**
+# YOLO가 내부적으로만 축소해 추론하고 박스는 원본 프레임 좌표로 되돌려주므로,
+# 이 값을 줄여도 zone 좌표와 호모그래피는 그대로 유효하다(재캘리브레이션 불필요).
+# 파이가 느리면 가장 먼저 건드릴 값. 대가는 작은 물체 검출률 하락이므로
+# tools/manual_camera_person_check.py 로 사람 모형이 계속 잡히는지 확인하며 낮출 것.
+DETECTION_IMGSZ = 640
 
 # =====================================================================
 # 카메라 (CLAUDE.md 2.1)
@@ -154,7 +202,7 @@ DETECTION_TRACKER = "bytetrack.yaml"  # ultralytics 내장 추적기. 필요 시
 # 중요: 라즈베리파이 5 + Raspberry Pi OS Bookworm에는 레거시 카메라 스택이 없어서
 # CSI 카메라가 /dev/video0으로 잡히지 않는다. 파이에서 CSI 카메라를 쓸 때는 반드시
 # "picamera2"로 둘 것. 0으로 두면 cv2.VideoCapture가 실패한다.
-CAMERA_SOURCE = 0
+CAMERA_SOURCE = "picamera2"
 
 # 프레임 해상도 (width, height). 두 백엔드(cv2 / Picamera2)에 동일하게 적용된다.
 #
@@ -177,3 +225,42 @@ CAMERA_MOUNT_ANGLE_DEG = None   # TODO(실측 필요): 보행자 신호등 부�
 SERIAL_PORT = None       # TODO(팀 합의 필요): 실제 포트 (예: "/dev/ttyUSB0", "/dev/ttyACM0", "COM3").
 SERIAL_BAUDRATE = None   # TODO(팀 합의 필요): 보드레이트.
 SERIAL_MESSAGE_FORMAT = None  # TODO(팀 합의 필요): 메시지 포맷 스펙 (프레이밍, 필드 정의 등).
+
+
+# =====================================================================
+# 쓰러짐 감지 (목표 2) — src/fall_detection.py
+# =====================================================================
+# 팀원 PoC(crosswalk_poc.py)의 CONFIG 중 쓰러짐 판단에 쓰이는 항목을 값·주석 그대로 옮긴 것.
+# 판단 로직(FallMonitor/FallTracker)이 이 dict를 통째로 받으므로 dict 형태를 유지한다
+# (로직을 원문 그대로 두기 위한 제약이다 — 개별 상수로 풀지 말 것).
+#
+# 시간 기반이지 프레임 기반이 아니라는 점이 핵심이다. PoC 설계 원칙 2번:
+# "저 fps 전제 — 2~3fps에서도 성립하는 시간 기반 로직 (프레임 수 카운트 금지, 항상 '초' 단위)".
+FALL_CONFIG = {
+    # 데모 셋업 후 실측으로 조정. 이 박스 안 = "횡단보도 위"
+    "crosswalk_roi": (0.15, 0.30, 0.85, 0.95),
+
+    # --- 쓰러짐 판정 ---
+    "fall_angle_deg": 50.0,       # 몸통 축이 수직에서 이만큼 기울면 후보
+    "fall_confirm_sec": 3.0,      # 이 시간 유지돼야 사이렌 확정 (3초 안에 일어나면 오탐으로 무시)
+    "fall_gap_sec": 1.0,          # 확정 전, 이 시간 이내의 짧은 미검출은 무시하고 카운트 이어감 (저 fps 깜빡임 대응)
+    "fall_gap_frames": 2,         # 위 갭의 하한을 '실측 프레임 간격 x N'으로도 잡는다.
+                                  # 고정 1초만 쓰면 프레임 간격이 1초를 넘는 보드에서
+                                  # 한 프레임 깜빡임에 후보가 취소돼 쓰러짐을 영영 확정 못 한다.
+    "fall_gap_max_sec": 4.0,      # 적응 상한 (fps가 병적으로 낮을 때 폭주 방지)
+    "fall_clear_sec": 3.0,        # 확정 후, '정상 자세 or ROI 이탈'이 이 시간 연속돼야 사이렌 해제 (깜빡임 방지)
+    "fall_aspect_ratio": 1.3,     # bbox 가로/세로 비율 보조 판정
+    "fall_roi_overlap": 0.3,      # 쓰러짐 판정용 ROI 겹침 비율 (발 한 점이 아니라 몸 전체 기준)
+
+    # --- 트랙 ID 유지 ---
+    # 넘어지는 순간 bbox 모양이 급변해 트래커가 ID를 새로 달면 누적이 리셋된다.
+    # 직전에 사라진 트랙과 충분히 겹치는 새 트랙은 그 상태를 물려받는다.
+    "track_grace_sec": 1.5,
+    "track_grace_frames": 2,      # fall_gap_frames와 같은 이유의 적응 하한.
+                                  # 고정 1.5초만 쓰면 프레임 간격이 1.5초를 넘는 순간
+                                  # '직전 프레임'조차 유예 밖으로 밀려나, ID가 빠진
+                                  # 검출이 매번 새 사람이 되고 누적이 영영 안 쌓인다.
+                                  # 유예의 단위는 '초'가 아니라 '프레임 수'여야 한다.
+    "track_grace_max_sec": 4.0,   # 적응 상한 (오래전 사람의 상태를 물려받는 것 방지)
+    "track_inherit_overlap": 0.3,   # 교집합/작은쪽넓이 기준 (IoU 아님 — bbox_overlap 주석 참고)
+}

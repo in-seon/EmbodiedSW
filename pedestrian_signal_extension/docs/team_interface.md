@@ -56,12 +56,53 @@ COCO 사전학습 yolov8n에 휠체어/목발/지팡이 클래스가 없어 검�
 
 ## 검출 모델
 
-- [x] **모델/가중치 선정 — COCO 사전학습 `yolov8n.pt`, `person` 클래스.**
-      근거: 사람 모형이 신뢰도 80%대로 검출됨(담당자 실측). 추가 파인튜닝 불필요.
+- [x] **모델/가중치 선정 — `yolov8n-pose.pt`, `person` 클래스.**
+      처음엔 `yolov8n.pt`로 확정했으나(사람 모형 신뢰도 80%대, 담당자 실측),
+      목표 2 병합 시 **추론 1회를 공유**하기 위해 포즈 가중치로 교체했다. 아래 "목표 2 병합" 참고.
+      추가 파인튜닝은 여전히 불필요.
 - [ ] 라즈베리파이 실측 FPS 벤치마크 (아직 미측정 — 추정치를 기록하지 말 것).
-      느리면 `ncnn`/`tflite` 변환, 입력 해상도 축소 검토.
+      느리면 **`DETECTION_IMGSZ` 하향을 먼저** 검토(재캘리브레이션 불필요),
+      그다음 `ncnn`/`tflite` 변환, `CAMERA_RESOLUTION` 축소(재캘리브레이션 필요).
 - [ ] 추적기 선택 확정 — `DETECTION_TRACKER` (현재 `bytetrack.yaml`).
       track_id가 끊기면 속도 추정과 잔류 판정이 모두 리셋되므로 안정성 확인 필요.
+
+## 목표 2 (쓰러짐 감지) 병합 — `src/fall_detection.py`
+
+팀원의 PoC(`crosswalk_poc.py`)에 있던 쓰러짐 판단 로직을 **한 글자도 바꾸지 않고**
+`src/fall_detection.py`로 옮겼다. 원문과 바이트 단위로 동일함을 확인했고
+(`Person` / `foot_in_roi` ~ `FallTracker`), 무작위 시나리오 300회 × 40프레임으로
+동작이 같은 것도 확인했다. 바꾼 것은 카메라·검출 배선뿐이다.
+
+- [x] **카메라 일원화** — PoC의 `FrameSource`/`OpenCVSource`/`PiCameraSource` 대신
+      `src/capture.py`의 `CameraCapture`를 쓴다. 양쪽 다 "파이 5 Bookworm에는 레거시
+      카메라 스택이 없어 CSI를 cv2로 못 연다"는 같은 문제를 각자 풀고 있었다.
+- [x] **검출 일원화** — PoC의 `Detector` 대신 `src/detection.py`의 `PersonDetector`.
+      `BoundingBox.keypoints`가 추가되어 포즈 결과를 그대로 실어 보낸다.
+- [x] **검출 모델을 `yolov8n-pose.pt`로 교체** — 포즈 모델 하나가 사람 박스와 키포인트를
+      같이 주므로 **프레임당 추론 1회로 두 목표가 다 돌아간다.** 사람 4명 이미지로 전 경로 검증됨
+      (박스 + (17,3) 키포인트 + 몸통각도 산출). → `docs/decisions.md` 2026-08-19 항목.
+- [ ] **⚠️ 파이에서 포즈 모델 FPS 재측정** — 목표 1의 모델은 실측으로 확정됐던 사항인데
+      (CLAUDE.md 2.6) 포즈 모델은 헤드가 하나 더 붙어 느려질 수 있다. 느리면 `DETECTION_IMGSZ`를
+      먼저 낮출 것(320이면 약 2.8배 빠르고 **재캘리브레이션 불필요**).
+- [ ] **⚠️ `DETECTION_CONFIDENCE_THRESHOLD` 확인** — 추론을 공유하니 임계값도 하나뿐이다.
+      PoC 0.4 / 목표 1 0.5 였고 **낮은 쪽 0.4를 택했다** (쓰러진 사람을 놓치는 것이
+      연장 오탐보다 위험하므로). 팀 확인 필요.
+- [x] **파라미터 config 일원화** — PoC의 `pose_model`/`imgsz`/`conf_thres`/`tracker`와
+      쓰러짐 판정값 13개가 전부 `config/config.py`로 모였다
+      (`DETECTION_*`, `FALL_CONFIG`). 소스에는 하드코딩된 파라미터가 없다.
+- [ ] **⚠️ 신호 제어 충돌 — 팀 합의 필요.** PoC의 `SignalController`/`SignalState`는
+      **가져오지 않았다.** 그 안에 자체 녹색 연장 로직이 있어서 목표 1의
+      `src/signal_extend.py`(구역·속도·상한·엣지 트리거)와 동시에 돌면 충돌한다.
+      `fall_detection.py`는 "쓰러짐이 확정됐는가"까지만 책임진다.
+      **정해야 할 것: 쓰러짐 확정(EMERGENCY) 시 신호를 어떻게 할 것인가?**
+      (연장 중단 후 적색? 연장 유지? 별도 사이렌만?) 그리고 그 명령을 제어부에
+      어떤 메시지로 보낼지.
+- [ ] **ROI 기준 통일** — PoC는 화면 비율 사각형(`crosswalk_roi`), 목표 1은 캘리브레이션된
+      네 꼭짓점을 쓴다. `roi_from_zones()`로 캘리브레이션 결과를 재사용할 수 있다(권장).
+      단 원문 로직이 축평행 사각형을 전제하므로 사다리꼴을 감싸는 바운딩 박스가 되어
+      실제 횡단보도보다 조금 넓다. 쓰러짐은 '놓치는 것'이 더 나쁘므로 안전한 방향의 오차다.
+- [ ] `crosswalk_poc.py`의 `Metrics`(CSV 로깅)는 옮기지 않았다. 실측 근거 확보에 유용하므로
+      필요하면 `tools/`에 수동 확인 스크립트로 두는 것을 검토.
 
 ## 하드웨어 / 통신
 

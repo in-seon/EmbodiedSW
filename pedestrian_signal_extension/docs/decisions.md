@@ -14,6 +14,123 @@ CLAUDE.md 5장: 파라미터를 정할 때 근거를 남겨 대회 발표 자료
 
 ---
 
+### 2026-08-19: 연장 발급 단위를 "프레임"이 아니라 "잔여시간 하강 구간"으로 (엣지 트리거)
+
+- **결정값**: `SignalExtensionStateMachine`이 `_armed` 플래그를 두고, **잔여시간이 임계값
+  아래로 내려온 구간당 연장을 한 번만** 발급한다. 무장은 '연장 발급'으로만 소모되고,
+  잔여시간이 임계값 위로 회복되면 되살아난다. 상태에 `SignalState.EXTENDED`(발급 후
+  제어부 반영 대기)를 추가했다.
+
+- **근거**: `evaluate()`는 실시간 루프에서 **매 프레임** 호출되는데, 원래 구현은 호출될
+  때마다 조건이 참이면 `accumulated_extension_sec += step`을 했다. 즉 설계 의도인
+  "매 사이클 재평가"가 코드에서는 "매 프레임 재연장"이 되어 있었다.
+
+  10fps 기준 재현 결과(임계값 5초, 3번 구역 5초, 상한 15초, 사람이 계속 서 있음):
+
+  | | 프레임별 발급값 | 결과 |
+  |---|---|---|
+  | 수정 전 | `[5, 5, 5, 0, 0, ...]` | **0.3초 만에 상한 소진**, 제어부로 명령 3연타 |
+  | 수정 후 | `[5, 0, 0, 0, 0, ...]` | 하강 구간당 1회, 명령 1회 |
+
+  제어부가 명령을 누적 처리하면 의도의 3배로 연장되고, 마지막 값만 반영하면 상한만
+  헛되이 소진된다. 어느 쪽이든 **차량 신호 충돌 방지용 상한(`MAX_TOTAL_EXTENSION_SEC`)이
+  안전장치로 기능하지 못한다.**
+
+  무장을 '하강'이 아니라 '발급'으로 소모하는 이유: 임계값 아래로 내려간 뒤에 뒤늦게
+  보행자가 들어오는 경우를 놓치지 않기 위해서다. 그리고 연장이 반영되어 잔여시간이
+  회복되면 자동 재무장되므로, **느린 보행자가 한 사이클에서 두 번 연장받는 경로는
+  그대로 살아 있다.** 그 총합을 막는 것이 상한의 역할이다.
+
+  타임라인 검증(임계값 5초 / 3번 구역 5초 / 상한 15초):
+  ```
+   t   잔여  발급  누적   상태
+   3     5     5     5   EXTENDING  <-- 연장
+   8     5     5    10   EXTENDING  <-- 연장 (회복 후 재무장됐으므로)
+  13     5     5    15   EXTENDING  <-- 연장
+  18     5     0    15   CAPPED     (상한 도달)
+  ```
+
+- **함께 고친 것 — 사이클 경계**: `reset()`이 정의만 되어 있고 **아무 데서도 호출되지
+  않았다.** 그대로 두면 첫 사이클에서 상한을 찍은 뒤 모든 사이클에서 영구히 `CAPPED`가
+  된다(엣지 트리거 도입 전에는 0.3초 만에 그 상태가 됐다). `SignalExtensionPipeline.
+  begin_new_cycle()`을 만들어 누적 연장·잔류 카운트·속도 히스토리를 함께 초기화한다.
+
+  다만 **호출 주체는 제어부다.** 신호 사이클의 소유자가 제어부이므로 "새 녹색 시작"
+  이벤트가 시리얼 프로토콜에 있어야 한다(`SerialComm.read_cycle_started()`).
+  파이가 잔여 시간의 증감만 보고 추측하는 방식은 채택하지 않았다 — "시간이 갑자기 늘었다"가
+  새 사이클인지 방금 요청한 연장이 반영된 것인지 구분할 수 없기 때문이다.
+
+- **참고 자료/벤치마크**: 회귀 테스트
+  `tests/test_signal_extend.py::test_extends_only_once_per_descent_below_threshold`,
+  `::test_rearms_after_remaining_time_recovers`,
+  `::test_arming_is_consumed_by_granting_not_by_descending`,
+  `tests/test_pipeline.py::test_does_not_resend_extension_every_frame`,
+  `::test_begin_new_cycle_resets_extension_budget`.
+  상세 경위는 `docs/bugfix_log.md` A·B 항목.
+
+  기존 테스트 `test_respects_upper_cap`은 **버그 동작을 그대로 인코딩**하고 있어서
+  (연속 두 번 호출로 상한 도달) 함께 고쳤다. 통과하는 테스트가 잘못된 동작을 지켜주고
+  있던 사례다.
+
+- **관련 config 값**: `REMAINING_TIME_THRESHOLD_SEC`, `MAX_TOTAL_EXTENSION_SEC`,
+  `ZONE_EXTENSION_SEC`, `SERIAL_MESSAGE_FORMAT`(사이클 시작 이벤트 포함 필요).
+
+---
+
+### 2026-08-19: 검출 모델을 yolov8n-pose로 교체 (목표 1·2가 추론 1회를 공유)
+
+- **결정값**: `DETECTION_MODEL_PATH = "yolov8n-pose.pt"`,
+  `DETECTION_CONFIDENCE_THRESHOLD = 0.4`(0.5에서 하향), `DETECTION_IMGSZ = 640`(신설).
+
+- **근거**:
+
+  **① 포즈 모델 하나가 박스와 키포인트를 동시에 준다.** 목표 1(신호 연장)은 사람 박스가,
+  목표 2(쓰러짐 감지)는 몸통 각도를 재기 위한 키포인트가 필요하다. 모델을 따로 두면
+  **추론이 2배**가 되는데, 실측상 추론이 프레임 시간의 사실상 전부다
+  (비전 이후 전 단계 25µs vs YOLO 110ms, 약 4,400:1 — 이 PC 기준).
+
+  실제 검증(사람 4명이 있는 이미지, `PersonDetector` 전 경로):
+  ```
+  PersonDetector.detect() -> 4명, 120 ms
+    id=1 conf=0.89 keypoints=(17,3) 몸통각도=1.1
+    id=2 conf=0.88 keypoints=(17,3) 몸통각도=1.7
+    id=3 conf=0.85 keypoints=(17,3) 몸통각도=None   <- 키포인트 신뢰도 낮음 -> 비율 폴백
+    id=4 conf=0.61 keypoints=(17,3) 몸통각도=None
+  ```
+  클래스는 `{0: "person"}` 하나뿐이라 `PEDESTRIAN_LABEL = "person"`이 그대로 맞는다.
+  서 있는 사람의 몸통 각도가 1~2도로 나와 `fall_angle_deg = 50` 기준과 잘 분리된다.
+
+  **② 신뢰도 임계값 0.4 — 두 목표가 추론을 공유하면 임계값도 하나뿐이다.**
+  팀원 PoC는 0.4, 목표 1은 0.5였다. 낮은 쪽을 택한 이유: 넘어지는 순간 bbox가 급변하고
+  신뢰도가 떨어져 검출이 통째로 빠지는 구간이 생기는데(팀원이 UR Fall 실측에서 확인,
+  `FallTracker` 주석 참고), **쓰러진 사람을 놓치는 것이 연장 오탐보다 훨씬 위험하다.**
+  목표 1의 사람 모형 관측치가 80%대였으므로 0.4도 여유가 충분하다.
+
+  **③ `DETECTION_IMGSZ` 신설 — 파이가 느릴 때 가장 먼저 건드릴 값.**
+  PoC에는 있었으나 우리 config에는 없어 ultralytics 기본값 640으로 돌고 있었다.
+  측정 결과 `imgsz=320`이 2.8배 빠르고(110.5ms → 39.0ms, 이 PC 기준),
+  **결과 좌표는 원본 프레임 기준으로 돌아온다**(`orig_shape=(480,640)` 확인).
+  즉 이 값을 낮춰도 zone 좌표·호모그래피가 그대로 유효해 **재캘리브레이션이 필요 없다.**
+  `CAMERA_RESOLUTION`을 낮추는 것과 결정적으로 다른 점이다.
+
+- **참고 자료/벤치마크**: 위 수치는 전부 이 PC(개발용) 기준이다.
+  **라즈베리파이 5 실측 FPS는 아직 미측정** — `tools/manual_camera_person_check.py`의
+  FPS 표시로 확인할 것. 포즈 모델은 일반 검출 모델보다 헤드가 하나 더 붙으므로
+  기존 `yolov8n.pt` 대비 느려질 수 있고, 그 차이도 파이에서 재야 한다.
+
+- **관련 config 값**: `DETECTION_MODEL_PATH`, `DETECTION_CONFIDENCE_THRESHOLD`,
+  `DETECTION_IMGSZ`, `DETECTION_TRACKER`, `PEDESTRIAN_LABEL`.
+
+- **되돌리는 법**: `DETECTION_MODEL_PATH`를 `"yolov8n.pt"`로 되돌리면 목표 1은 그대로
+  동작하고, 목표 2는 키포인트 없이 bbox 가로/세로 비율 폴백으로 동작한다(원문 그대로).
+  코드 수정 없이 config 한 줄이다.
+
+- **이전 결정과의 관계**: 2026-08-05 "검출 모델을 COCO 사전학습 yolov8n으로 확정"을
+  **대체한다.** 그때 근거였던 "사람 모형이 80%대로 검출됨"은 포즈 모델에도 유효하나,
+  파이 FPS는 다시 재야 한다.
+
+---
+
 ### 2026-08-19: 연장 시간·상한을 국내 스마트횡단보도 운영 사례 기준으로 결정
 
 - **결정값**:
