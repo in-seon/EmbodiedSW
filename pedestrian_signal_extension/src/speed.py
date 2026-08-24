@@ -48,24 +48,37 @@ class SpeedEstimator:
     프레임 간 대응을 알 수 없으므로 무시한다(속도를 낼 근거가 없다).
     """
 
-    def __init__(self, ground_plane=None, window_sec=None, min_samples=None):
+    def __init__(self, ground_plane=None, window_sec=None, min_samples=None, grace_frames=None):
         """ground_plane: GroundPlane 또는 None.
 
         None이면 픽셀 좌표 그대로 계산하고 unit="px/s"로 표시한다.
         (횡단보도 실측 치수 CROSSWALK_REAL_*_CM 가 config에 없을 때의 동작.)
+
+        grace_frames: 이만큼의 연속 미검출까지는 히스토리를 버리지 않는다
+        (config.TRACK_GRACE_FRAMES). 0이면 유예 없음.
         """
         self.ground_plane = ground_plane
         self.window_sec = window_sec if window_sec is not None else config.SPEED_WINDOW_SEC
         self.min_samples = min_samples if min_samples is not None else config.SPEED_MIN_SAMPLES
+        # 0은 '유예 없음'이라는 유효한 설정이므로 `or`가 아니라 None 검사를 쓴다.
+        self.grace_frames = (
+            grace_frames if grace_frames is not None else config.TRACK_GRACE_FRAMES
+        )
         if self.window_sec is None or self.window_sec <= 0:
             raise ValueError(f"window_sec은 양수여야 합니다: {self.window_sec}")
         if self.min_samples is None or self.min_samples < 2:
             raise ValueError(f"min_samples는 2 이상이어야 합니다(변위를 재려면 두 점이 필요): {self.min_samples}")
+        if self.grace_frames is None or self.grace_frames < 0:
+            raise ValueError(
+                f"grace_frames는 0 이상이어야 합니다(0 = 유예 없음): {self.grace_frames}"
+            )
 
         # track_id -> deque[(timestamp, (x, y))]
         self._history = {}
         # track_id -> TrackSpeed (가장 최근 계산 결과)
         self._latest = {}
+        # track_id -> 연속 미검출 프레임 수 (유예 계산용)
+        self._misses = {}
 
     @property
     def unit(self) -> str:
@@ -139,10 +152,14 @@ class SpeedEstimator:
         detections: (track_id, foot_point) 튜플의 iterable.
         반환: {track_id: TrackSpeed} — 아직 속도를 못 낸 트랙은 빠진다.
 
-        이번 프레임에 보이지 않은 트랙의 히스토리는 지운다. 사라졌다가 같은 ID로 다시
-        나타나면 그 공백을 가로질러 변위를 재게 되는데, 그러면 실제보다 훨씬 느린 속도가
-        나온다(먼 거리를 긴 시간으로 나눈 셈이 아니라, 끊긴 구간을 이동한 것으로 치므로).
-        CrosswalkOccupancy도 같은 이유로 리셋한다.
+        이번 프레임에 보이지 않은 트랙의 히스토리는 **유예(grace_frames)를 넘겼을 때** 지운다.
+        사라졌다가 같은 ID로 다시 나타나면 그 공백을 가로질러 변위를 재게 되는데, 그러면
+        실제보다 훨씬 느린 속도가 나오고(끊긴 구간을 계속 이동한 것으로 치므로), 느린 속도는
+        곧 과대한 ETA -> 불필요한 연장이 된다.
+
+        다만 한두 프레임 깜빡임까지 지우면 다시 window_sec만큼 샘플을 쌓아야 하고, 그동안
+        ETA가 None이 되어 속도 기반 연장이 조용히 꺼진다. 그래서 유예 안에서는 히스토리를
+        그대로 두고 직전 속도(latest)도 유지한다. CrosswalkOccupancy가 같은 규칙을 쓴다.
         """
         seen = set()
         results = {}
@@ -150,14 +167,20 @@ class SpeedEstimator:
             if track_id is None:
                 continue
             seen.add(track_id)
+            self._misses[track_id] = 0
             result = self.update(track_id, foot_point, timestamp)
             if result is not None:
                 results[track_id] = result
 
         for track_id in list(self._history):
-            if track_id not in seen:
+            if track_id in seen:
+                continue
+            misses = self._misses.get(track_id, 0) + 1
+            self._misses[track_id] = misses
+            if misses > self.grace_frames:
                 self._history.pop(track_id, None)
                 self._latest.pop(track_id, None)
+                self._misses.pop(track_id, None)
 
         return results
 
@@ -187,3 +210,4 @@ class SpeedEstimator:
     def clear(self):
         self._history.clear()
         self._latest.clear()
+        self._misses.clear()

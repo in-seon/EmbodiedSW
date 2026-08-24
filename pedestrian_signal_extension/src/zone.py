@@ -217,18 +217,40 @@ class CrosswalkOccupancy:
     검출 흔들림에 대비해, 횡단보도(아무 구역) 안에서 confirm_frames 이상 연속 검출돼야
     '확정 보행자'로 본다. 트랙 ID 부여(추적/재식별)는 검출 파이프라인 책임이며 여기선 받기만 한다.
 
-    참고: 지금은 한 프레임이라도 검출이 끊기면 카운트를 리셋한다(단순·보수적). 추후 실측에서
-    깜빡임이 잦으면 '몇 프레임 유예(grace)' 로직을 추가해 완화할 수 있다.
+    ## 미검출 유예 (grace_frames)
+
+    YOLO는 가림·모션블러·저조도에서 한두 프레임씩 사람을 놓치는 것이 정상이다. 그때마다
+    카운트를 0으로 되돌리면 확정 보행자가 좀처럼 나오지 않고, **에러 없이 조용히 연장만
+    빠진다.** 그래서 grace_frames 프레임까지의 미검출은 상태를 지우지 않고 넘어간다.
+
+    유예 동안 카운트는 **동결**된다 — 안 보이는 동안은 잔류의 증거가 없으므로 올려주지 않되,
+    이미 쌓은 것을 뺏지도 않는다. 구역 번호는 마지막으로 본 값을 유지한다.
+
+    단, **'구역 밖으로 나감'은 유예 대상이 아니다**(즉시 리셋). "안 보임"은 정보가 없는
+    상태지만 "밖으로 나감"은 확실한 정보다. 둘을 같이 취급하면 이미 횡단보도를 벗어난
+    사람 때문에 차를 세우게 된다.
+
+    유예 단위가 '초'가 아니라 '프레임 수'인 이유는 확정 기준(confirm_frames)이 프레임 수라
+    같은 단위여야 섞이지 않기 때문이다. FallTracker가 '초 + 프레임 배수' 적응형을 쓰는 것은
+    그쪽 누적(fall_confirm_sec)이 시간 기준이라서다 — config.TRACK_GRACE_FRAMES 주석 참고.
     """
 
-    def __init__(self, crosswalk_zones: CrosswalkZones, confirm_frames=None):
+    def __init__(self, crosswalk_zones: CrosswalkZones, confirm_frames=None, grace_frames=None):
         self.zones = crosswalk_zones
         self.confirm_frames = confirm_frames or config.ZONE_RESIDENCY_FRAMES
         if self.confirm_frames is None:
             raise NotImplementedError(
                 "ZONE_RESIDENCY_FRAMES가 설정되지 않았습니다. 실측 FPS 기반으로 값을 정한 뒤 사용하세요."
             )
-        # track_id -> {"count": 연속 프레임 수, "zone": 최근 구역 번호}
+        # 0은 '유예 없음'이라는 유효한 설정이므로 `or`가 아니라 None 검사를 쓴다.
+        self.grace_frames = (
+            grace_frames if grace_frames is not None else config.TRACK_GRACE_FRAMES
+        )
+        if self.grace_frames is None or self.grace_frames < 0:
+            raise ValueError(
+                f"grace_frames는 0 이상이어야 합니다(0 = 유예 없음): {self.grace_frames}"
+            )
+        # track_id -> {"count": 연속 프레임 수, "zone": 최근 구역 번호, "misses": 연속 미검출 수}
         self._state = {}
         # 직전 update()에서 track_id가 없어 무시한 검출 수 (아래 update 주석 참고).
         self.untracked_count = 0
@@ -254,17 +276,24 @@ class CrosswalkOccupancy:
                 continue
             zone_index = self.zones.locate(point)
             if zone_index is None:
-                self._state.pop(track_id, None)  # 횡단보도 밖 -> 카운트 리셋
+                # 횡단보도 밖 -> 유예 없이 즉시 리셋 (클래스 주석 참고: '안 보임'과 다르다)
+                self._state.pop(track_id, None)
                 continue
             seen.add(track_id)
-            st = self._state.get(track_id, {"count": 0, "zone": None})
+            st = self._state.get(track_id, {"count": 0, "zone": None, "misses": 0})
             st["count"] += 1
             st["zone"] = zone_index
+            st["misses"] = 0
             self._state[track_id] = st
 
-        # 이번 프레임에 검출되지 않은 트랙 제거
+        # 이번 프레임에 검출되지 않은 트랙: 유예 안에서는 상태를 그대로 두고(카운트 동결),
+        # 유예를 넘기면 그때 제거한다.
         for track_id in list(self._state):
-            if track_id not in seen:
+            if track_id in seen:
+                continue
+            st = self._state[track_id]
+            st["misses"] += 1
+            if st["misses"] > self.grace_frames:
                 self._state.pop(track_id, None)
 
         return self.confirmed()

@@ -64,6 +64,29 @@ PRIORITY_MAX_TOTAL_EXTENSION_SEC = None   # TODO(팀 확정 필요): 우선 연�
 ZONE_RESIDENCY_FRAMES = None    # TODO(실측 필요): 실측 FPS 기반으로 튜닝.
 ZONE_CONFIG_PATH = "data/zone_config.json"  # tools/zone_calibrator.py 로 생성되는 zone 좌표 파일 경로.
 
+# 검출이 몇 프레임 끊겨도 그 사람의 누적(잔류 카운트 / 속도 히스토리)을 버리지 않고 유지할지.
+#
+# 왜 필요한가: 이 값이 없으면 **한 프레임만 놓쳐도** 그 사람의 잔류 카운트가 0으로 돌아가고
+# 속도 히스토리가 통째로 지워진다. 에러가 나지 않고 조용히 리셋되므로, 현장에서는
+# "왜 가끔 연장이 안 되지"로만 보이고 원인을 찾기가 어렵다. YOLO는 가림·모션블러·
+# 저조도에서 한두 프레임씩 사람을 놓치는 것이 정상이므로, 그 정도는 넘어가야 한다.
+#
+# 유예 동안 카운트는 **동결**된다 — 안 보이는 동안은 잔류의 증거가 없으므로 올려주지 않되,
+# 이미 쌓은 것을 뺏지도 않는다. 유예를 넘기면 그때 삭제한다.
+# 단, '횡단보도 구역 밖으로 나감'은 유예 대상이 아니다(즉시 리셋). "안 보임"은 정보가 없는
+# 것이고 "밖으로 나감"은 확실한 정보라, 둘을 같이 취급하면 떠난 사람 때문에 연장하게 된다.
+#
+# 왜 '초'가 아니라 '프레임 수'인가: 잔류 확정(ZONE_RESIDENCY_FRAMES) 자체가 프레임 수 기준이라
+# 유예도 같은 단위여야 섞이지 않는다. FALL_CONFIG의 track_grace_sec이 '초 + 프레임 배수' 적응형인
+# 것은 그쪽 누적(fall_confirm_sec = 3.0초)이 시간 기준이라 같은 시계로 재야 하기 때문이다.
+# 기준이 다르므로 값도 따로 둔다 — FALL_CONFIG 쪽을 재사용하지 말 것.
+#
+# 값 2의 근거: 파이 + YOLO 실측 FPS가 3~8fps 범위일 것으로 보이며, 그 구간에서 2프레임은
+# 0.25~0.7초의 여유가 된다. 깜빡임을 흡수하기엔 충분하고, 이미 떠난 사람 때문에 차를
+# 세우기엔 짧다. 실측에서 미검출 구간이 더 길게 나오면 3~4로 올린다.
+# (FPS 실측: python tools/manual_camera_person_check.py --source picamera2 → 화면 좌상단 HUD)
+TRACK_GRACE_FRAMES = 2
+
 # =====================================================================
 # 횡단보도 평면 좌표 변환(호모그래피) — 속도 추정용 (CLAUDE.md 2.2, 2.3)
 # =====================================================================
@@ -92,12 +115,6 @@ CROSSWALK_REAL_LENGTH_CM = None  # TODO(실측 필요): 횡단보도(모형) 길
 SPEED_WINDOW_SEC = 0.5
 
 # 위 윈도우 안에 최소 이만큼 샘플이 쌓여야 속도를 낸다(그 전엔 None 반환).
-#
-# 2를 유지할 것. 속도 계산은 히스토리의 **양 끝 샘플만** 쓰므로(src/speed.py) 이 값을 늘려도
-# 정확도가 좋아지지 않고, 첫 속도가 나오는 시점만 늦어진다. 게다가 SPEED_WINDOW_SEC(0.5초)
-# 안에 N개가 쌓이려면 최소 (N-1)/0.5 fps가 필요해서, 3으로 두면 4fps 미만인 보드에서
-# 속도가 영원히 None이 되고 ETA 기반 연장이 조용히 꺼진다.
-# 노이즈를 줄이려면 이 값이 아니라 SPEED_WINDOW_SEC를 늘릴 것.
 SPEED_MIN_SAMPLES = 2
 
 # 계산된 속도를 신호 연장 시간 결정에 반영할지 여부.
@@ -151,11 +168,11 @@ PEDESTRIAN_LABEL = "person"     # COCO 클래스명. 파인튜닝 모델로 교�
 #   축소 모형(장난감 휠체어)은 아예 못 잡을 수 있다. 투자하기 전에
 #   `python tools/manual_camera_person_check.py --source 모형사진.jpg --aid-model 후보.pt`
 #   로 우리 모형에서 실제로 잡히는지부터 볼 것.
-MOBILITY_AID_MODEL_PATH = None   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
+MOBILITY_AID_MODEL_PATH = "yolo_detect_vulnerable.pt"   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
 
 # 위 모델이 아는 클래스명 중 '교통약자'로 볼 것들. 모델마다 이름이 다르므로
 # `YOLO(경로).names` 로 확인한 뒤 채운다. 비어 있으면 모델이 아는 클래스를 전부 쓴다.
-MOBILITY_AID_LABELS = ()
+MOBILITY_AID_LABELS = ('wheelchair', 'crutches', 'prams')  # TODO: 후보 가중치가 아는 클래스명으로 교체.
 
 # 보조 모델 추론 주기(프레임). 1이면 매 프레임(비쌈). 위 설명 참고.
 MOBILITY_AID_EVERY_N_FRAMES = 10

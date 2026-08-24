@@ -16,8 +16,17 @@ pytest 자동 수집 대상이 아니도록 tools/ 에 둔다(카메라 창을 �
     python tools/manual_camera_person_check.py --source 0         # PC USB 웹캠
     python tools/manual_camera_person_check.py --source path/to/test.mp4
     python tools/manual_camera_person_check.py --no-zones      # zone 설정 없이 검출만
+    python tools/manual_camera_person_check.py --no-display    # 창 없이 측정값만 출력(헤드리스)
 
-    'q' : 종료
+    'q' : 종료 (--no-display 일 때는 Ctrl+C)
+
+## 실측 FPS를 잴 때는 --no-display 를 쓸 것
+
+모니터 없이 `ssh -X` 로 창을 띄우면 프레임을 네트워크로 보내는 시간이 루프에 그대로
+포함된다. 루프가 `추론 -> 그리기 -> imshow -> waitKey` 로 직렬이라, 그때 보이는 FPS는
+파이의 실제 처리 성능이 아니라 X11 전송 속도에 눌린 하한값이다.
+`--no-display` 는 그리기와 imshow를 건너뛰고 1초에 한 번만 측정값을 stdout으로 찍으므로
+(매 프레임 출력하면 그 출력이 다시 루프를 느리게 만든다) 순수 추론 성능을 볼 수 있다.
 
 zone 설정(data/zone_config.json)이 없으면 자동으로 검출만 표시한다.
 먼저 `python tools/zone_calibrator.py --source 0 --width-cm .. --length-cm ..` 를 돌릴 것.
@@ -98,6 +107,12 @@ def main():
     parser.add_argument("--source", default=config.CAMERA_SOURCE,
                         help="'picamera2'(파이 CSI) / 카메라 인덱스 / 영상 경로 / 스트림 URL")
     parser.add_argument("--no-zones", action="store_true", help="zone 판정 없이 검출만 표시")
+    parser.add_argument("--no-display", action="store_true",
+                        help="창을 띄우지 않고 측정값만 1초마다 stdout으로 출력한다(헤드리스). "
+                             "모니터 없이 SSH로 접속한 파이에서 실측 FPS를 잴 때 쓴다. "
+                             "ssh -X로 창을 띄우면 프레임을 네트워크로 보내는 시간이 루프에 "
+                             "포함돼 FPS가 실제보다 낮게 나오므로, 성능 측정에는 이 옵션을 쓸 것. "
+                             "종료는 Ctrl+C.")
     parser.add_argument("--confirm-frames", type=int, default=config.ZONE_RESIDENCY_FRAMES or 3,
                         help="'확정 보행자'로 보기까지 필요한 연속 검출 프레임 수. "
                              "config.ZONE_RESIDENCY_FRAMES가 아직 미정이라 화면 확인용 기본값 3을 쓴다.")
@@ -144,87 +159,120 @@ def main():
     camera = CameraCapture(source=source).open()
     print(f"[안내] 카메라 백엔드: {camera.backend_name}  (source={source!r})")
 
-    print("카메라 창에서 'q'를 누르면 종료합니다.")
+    show = not args.no_display
+    if show:
+        print("카메라 창에서 'q'를 누르면 종료합니다.")
+    else:
+        print("[안내] --no-display: 창 없이 1초마다 측정값을 출력합니다. 종료는 Ctrl+C.")
+
     fps_t0, fps_frames, fps = time.monotonic(), 0, 0.0
 
     still = None          # 정지 이미지 소스면 첫 프레임을 붙들고 반복한다(모형 사진 확인용)
-    while True:
-        frame = still if still is not None else camera.read_frame()
-        if frame is None:
-            print("프레임을 읽을 수 없습니다.")
-            break
-        if still is None and _is_still_image(source):
-            still = frame
-        frame = frame.copy() if still is not None else frame
+    try:
+        while True:
+            frame = still if still is not None else camera.read_frame()
+            if frame is None:
+                print("프레임을 읽을 수 없습니다.")
+                break
+            if still is None and _is_still_image(source):
+                still = frame
+            frame = frame.copy() if still is not None else frame
 
-        now = time.monotonic()
-        boxes = [b for b in detector.detect(frame) if b.is_pedestrian()]
-        detections = [(b.track_id, b.foot_point()) for b in boxes]
+            now = time.monotonic()
+            boxes = [b for b in detector.detect(frame) if b.is_pedestrian()]
+            detections = [(b.track_id, b.foot_point()) for b in boxes]
 
-        # 교통약자 보조 검출 (저빈도). 비활성이면 빈 목록.
-        aid_boxes = aid.detect(frame)
+            # 교통약자 보조 검출 (저빈도). 비활성이면 빈 목록.
+            aid_boxes = aid.detect(frame)
 
-        confirmed = occupancy.update(detections) if occupancy else {}
-        speeds = speed.update_many(detections, now)
+            confirmed = occupancy.update(detections) if occupancy else {}
+            speeds = speed.update_many(detections, now)
 
-        if zones is not None:
-            _draw_zones(frame, zones)
+            if show and zones is not None:
+                _draw_zones(frame, zones)
 
-        for ab in aid_boxes:
-            cv2.rectangle(frame, (int(ab.x1), int(ab.y1)), (int(ab.x2), int(ab.y2)), MAGENTA, 2)
-            cv2.putText(frame, f"{ab.label} {ab.confidence:.2f}",
-                        (int(ab.x1), max(int(ab.y1) - 6, 12)), FONT, 0.5, MAGENTA, 2)
+            if show:
+                for ab in aid_boxes:
+                    cv2.rectangle(frame, (int(ab.x1), int(ab.y1)), (int(ab.x2), int(ab.y2)), MAGENTA, 2)
+                    cv2.putText(frame, f"{ab.label} {ab.confidence:.2f}",
+                                (int(ab.x1), max(int(ab.y1) - 6, 12)), FONT, 0.5, MAGENTA, 2)
 
-        for box in boxes:
-            fx, fy = box.foot_point()
-            zone_index = zones.locate((fx, fy)) if zones else None
-            is_confirmed = box.track_id in confirmed
-            color = GREEN if is_confirmed else YELLOW if zone_index else WHITE
+            # 사람별 측정값은 화면 표시 여부와 무관하게 만든다. 헤드리스에서는 이 문자열을
+            # 그대로 stdout으로 내보내므로, 창으로 보는 것과 같은 값을 보게 된다.
+            person_lines = []
+            for box in boxes:
+                fx, fy = box.foot_point()
+                zone_index = zones.locate((fx, fy)) if zones else None
+                is_confirmed = box.track_id in confirmed
+                color = GREEN if is_confirmed else YELLOW if zone_index else WHITE
 
-            cv2.rectangle(frame, (int(box.x1), int(box.y1)), (int(box.x2), int(box.y2)), color, 2)
-            # 위치 판정의 기준점 — 박스 중심이 아니라 하단 모서리 중심임을 눈으로 확인.
-            cv2.circle(frame, (int(fx), int(fy)), 5, RED, -1)
+                tid = box.track_id if box.track_id is not None else "-"
+                lines = [f"id={tid} conf={box.confidence:.2f}"]
+                lines.append(
+                    f"zone={zone_index if zone_index else '-'}"
+                    f"{' CONFIRMED' if is_confirmed else ''}"
+                )
+                ts = speeds.get(box.track_id)
+                if ts is not None:
+                    arrow = "^" if ts.direction > 0 else "v" if ts.direction < 0 else "-"
+                    lines.append(f"speed={ts.crossing_speed:.1f} {ts.unit} {arrow}")
+                    eta = speed.estimated_crossing_time_sec(box.track_id)
+                    if eta is not None:
+                        lines.append(f"ETA={eta:.1f}s")
+                else:
+                    lines.append("speed=...")
+                person_lines.append(" ".join(lines))
 
-            tid = box.track_id if box.track_id is not None else "-"
-            lines = [f"id={tid} conf={box.confidence:.2f}"]
-            lines.append(
-                f"zone={zone_index if zone_index else '-'}"
-                f"{' CONFIRMED' if is_confirmed else ''}"
-            )
-            ts = speeds.get(box.track_id)
-            if ts is not None:
-                arrow = "^" if ts.direction > 0 else "v" if ts.direction < 0 else "-"
-                lines.append(f"speed={ts.crossing_speed:.1f} {ts.unit} {arrow}")
-                eta = speed.estimated_crossing_time_sec(box.track_id)
-                if eta is not None:
-                    lines.append(f"ETA={eta:.1f}s")
-            else:
-                lines.append("speed=...")
+                if show:
+                    cv2.rectangle(frame, (int(box.x1), int(box.y1)),
+                                  (int(box.x2), int(box.y2)), color, 2)
+                    # 위치 판정의 기준점 — 박스 중심이 아니라 하단 모서리 중심임을 눈으로 확인.
+                    cv2.circle(frame, (int(fx), int(fy)), 5, RED, -1)
+                    y = max(int(box.y1) - 8, 14)
+                    for line in reversed(lines):
+                        cv2.putText(frame, line, (int(box.x1), y), FONT, 0.5, color, 2)
+                        y -= 16
 
-            y = max(int(box.y1) - 8, 14)
-            for line in reversed(lines):
-                cv2.putText(frame, line, (int(box.x1), y), FONT, 0.5, color, 2)
-                y -= 16
+            fps_frames += 1
+            fps_updated = now - fps_t0 >= 1.0
+            if fps_updated:
+                fps = fps_frames / (now - fps_t0)
+                fps_t0, fps_frames = now, 0
+            # 라즈베리파이 실측 FPS는 이 값으로 확인한다 (CLAUDE.md 2.6 — 추정치 기록 금지).
+            hud = f"FPS {fps:.1f} | {camera.backend_name} | unit {speed.unit}"
+            if aid.enabled:
+                hud += f" | aid {len(aid_boxes)} (x{aid.inference_count})"
 
-        fps_frames += 1
-        if now - fps_t0 >= 1.0:
-            fps = fps_frames / (now - fps_t0)
-            fps_t0, fps_frames = now, 0
-        # 라즈베리파이 실측 FPS는 이 값으로 확인한다 (CLAUDE.md 2.6 — 추정치 기록 금지).
-        hud = f"FPS {fps:.1f} | {camera.backend_name} | unit {speed.unit}"
-        if aid.enabled:
-            hud += f" | aid {len(aid_boxes)} (x{aid.inference_count})"
-        cv2.putText(frame, hud, (10, 22), FONT, 0.6, WHITE, 2)
-        if aid_boxes:
-            cv2.putText(frame, "PRIORITY (mobility aid detected)", (10, 44),
-                        FONT, 0.6, MAGENTA, 2)
+            if not show:
+                # 1초에 한 번만 찍는다. 매 프레임 출력하면 그 자체가 루프를 느리게 만들어
+                # 측정하려는 FPS를 왜곡한다.
+                if fps_updated:
+                    summary = f"{hud} | 사람 {len(boxes)}명"
+                    if occupancy is not None:
+                        summary += f" (확정 {len(confirmed)}, ID없음 {occupancy.untracked_count})"
+                    print(summary, flush=True)
+                    for line in person_lines:
+                        print(f"    {line}", flush=True)
+                    if aid_boxes:
+                        print("    PRIORITY (mobility aid detected)", flush=True)
+                continue
 
-        cv2.imshow("Detection + Zone + Speed (q: quit)", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            cv2.putText(frame, hud, (10, 22), FONT, 0.6, WHITE, 2)
+            if aid_boxes:
+                cv2.putText(frame, "PRIORITY (mobility aid detected)", (10, 44),
+                            FONT, 0.6, MAGENTA, 2)
 
-    camera.close()
-    cv2.destroyAllWindows()
+            cv2.imshow("Detection + Zone + Speed (q: quit)", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    except KeyboardInterrupt:
+        # --no-display 모드의 정상 종료 경로. 카메라를 반드시 놓아주고 나간다
+        # (Picamera2는 해제하지 않으면 다음 실행에서 열리지 않는 경우가 있다).
+        print("\n[안내] 중단됨 (Ctrl+C).")
+    finally:
+        camera.close()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

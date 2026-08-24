@@ -158,6 +158,85 @@ def test_occupancy_missing_config_raises():
         CrosswalkOccupancy(zones, confirm_frames=None)
 
 
+# --- 미검출 유예 (config.TRACK_GRACE_FRAMES) ---
+#
+# YOLO는 가림·모션블러·저조도에서 한두 프레임씩 사람을 놓친다. 그때마다 잔류 카운트를
+# 0으로 되돌리면 확정 보행자가 영영 안 나오고, 에러 없이 조용히 연장만 빠진다.
+
+def test_occupancy_tolerates_brief_detection_gap():
+    """유예 안의 깜빡임은 카운트를 잃지 않고 이어간다."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=3, grace_frames=2)
+
+    occ.update([("p1", (25, 5))])                      # count 1
+    occ.update([])                                     # 미검출 1
+    occ.update([])                                     # 미검출 2 (유예 이내)
+    assert occ.update([("p1", (25, 5))]) == {}         # count 2 — 이어서 셈
+    assert occ.update([("p1", (25, 5))]) == {"p1": 3}  # count 3 -> 확정
+
+
+def test_occupancy_freezes_count_during_gap():
+    """유예 동안 카운트는 동결된다 — 안 보이는 프레임을 잔류로 쳐주면 안 된다."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=2)
+
+    occ.update([("p1", (25, 5))])                      # count 1
+    assert occ.update([]) == {}                        # 미검출 — 여기서 확정되면 안 된다
+    assert occ.update([("p1", (25, 5))]) == {"p1": 3}  # count 2 -> 확정
+
+
+def test_occupancy_drops_track_after_grace_expires():
+    """유예를 넘긴 미검출은 그때 삭제한다 — 떠난 사람을 영원히 붙들지 않는다."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=2)
+
+    occ.update([("p1", (25, 5))])
+    occ.update([])
+    occ.update([])
+    occ.update([])                                     # 미검출 3 > 유예 2 -> 삭제
+    assert occ.update([("p1", (25, 5))]) == {}         # 처음부터 다시
+
+
+def test_occupancy_confirmed_pedestrian_survives_gap():
+    """이미 확정된 보행자는 깜빡임 동안 확정 상태를 유지한다 — 연장이 끊기지 않아야 한다."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=1, grace_frames=2)
+
+    assert occ.update([("p1", (25, 5))]) == {"p1": 3}
+    assert occ.update([]) == {"p1": 3}                 # 미검출이어도 확정 유지
+    assert occ.occupied_zones() == [3]
+
+
+def test_occupancy_zone_exit_ignores_grace():
+    """'안 보임'과 '구역 밖으로 나감'은 다르다 — 후자는 유예 없이 즉시 리셋한다.
+
+    안 보이는 것은 정보가 없는 상태지만, 밖으로 나간 것은 확실한 정보다. 둘을 같이
+    취급하면 이미 횡단보도를 벗어난 사람 때문에 차를 세우게 된다.
+    """
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=2)
+
+    occ.update([("p1", (25, 5))])
+    occ.update([("p1", (100, 100))])                   # 횡단보도 밖 -> 즉시 리셋
+    assert occ.update([("p1", (25, 5))]) == {}
+
+
+def test_occupancy_grace_zero_drops_immediately():
+    """grace_frames=0이면 유예 도입 전과 같이 한 프레임 미검출에 바로 리셋된다."""
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    occ = CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=0)
+
+    occ.update([("p1", (25, 5))])
+    occ.update([])
+    assert occ.update([("p1", (25, 5))]) == {}
+
+
+def test_occupancy_rejects_negative_grace():
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    with pytest.raises(ValueError):
+        CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=-1)
+
+
 # --- 캘리브레이션 해상도 검증 (버그 C) ---
 
 def _write_zone_config(tmp_path, **extra):

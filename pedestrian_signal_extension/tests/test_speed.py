@@ -202,16 +202,52 @@ def test_update_many_ignores_untracked_detections(estimator):
 
 
 def test_update_many_drops_vanished_track(estimator):
-    """사라진 트랙의 히스토리는 지운다 — 공백을 가로질러 속도를 재면 값이 왜곡된다."""
+    """유예를 넘겨 사라진 트랙의 히스토리는 지운다 — 공백을 가로질러 속도를 재면 값이 왜곡된다.
+
+    긴 공백을 이어붙이면 '끊긴 구간을 계속 이동한 것'으로 쳐서 실제보다 훨씬 느린 속도가
+    나오고, 느린 속도는 곧 과대한 ETA -> 불필요한 연장이 된다.
+    """
     estimator.update_many([("p1", (50, 0))], timestamp=0.0)
     estimator.update_many([("p1", (50, 20))], timestamp=1.0)
     assert estimator.latest("p1") is not None
 
-    estimator.update_many([], timestamp=2.0)  # p1이 검출되지 않음
+    for t in (2.0, 3.0, 4.0):     # 미검출 3프레임 > 유예 2프레임
+        estimator.update_many([], timestamp=t)
     assert estimator.latest("p1") is None
 
     # 다시 나타나면 처음부터 다시 쌓는다.
-    assert estimator.update_many([("p1", (50, 90))], timestamp=3.0) == {}
+    assert estimator.update_many([("p1", (50, 90))], timestamp=5.0) == {}
+
+
+def test_update_many_tolerates_brief_gap(estimator):
+    """유예 안의 깜빡임에는 히스토리를 버리지 않는다 (config.TRACK_GRACE_FRAMES).
+
+    버리면 다시 SPEED_WINDOW_SEC만큼 샘플을 쌓아야 하고, 그동안 ETA가 None이 되어
+    속도 기반 연장이 조용히 꺼진다.
+    """
+    estimator.update_many([("p1", (50, 0))], timestamp=0.0)
+    estimator.update_many([("p1", (50, 20))], timestamp=1.0)
+
+    estimator.update_many([], timestamp=2.0)      # 미검출 1 (유예 이내)
+    assert estimator.latest("p1") is not None     # 직전 속도를 계속 들고 있는다
+
+    # 다시 나타나면 기존 히스토리에 이어붙어 곧바로 속도가 나온다.
+    assert "p1" in estimator.update_many([("p1", (50, 60))], timestamp=3.0)
+
+
+def test_grace_zero_drops_immediately(plane):
+    """grace_frames=0이면 유예 도입 전과 같은 동작."""
+    estimator = SpeedEstimator(ground_plane=plane, window_sec=10.0, grace_frames=0)
+    estimator.update_many([("p1", (50, 0))], timestamp=0.0)
+    estimator.update_many([("p1", (50, 20))], timestamp=1.0)
+
+    estimator.update_many([], timestamp=2.0)
+    assert estimator.latest("p1") is None
+
+
+def test_rejects_negative_grace():
+    with pytest.raises(ValueError):
+        SpeedEstimator(window_sec=1.0, grace_frames=-1)
 
 
 def test_unit_reflects_ground_plane_presence(plane):
