@@ -244,7 +244,7 @@ DETECTION_MODEL_PATH = _weight_path("yolov8n-pose.pt")  # 없으면 최초 실�
 # 낮은 쪽(0.4)을 택했다: 넘어지는 순간에는 bbox가 급변하고 신뢰도가 떨어져 검출이 빠지는데
 # (팀원이 UR Fall 실측에서 확인), 쓰러진 사람을 놓치는 것이 연장 오탐보다 훨씬 위험하다.
 # 목표 1의 사람 모형 관측치가 80%대였으므로 0.4도 충분히 여유가 있다. 팀 확인 대상.
-DETECTION_CONFIDENCE_THRESHOLD = 0.4
+DETECTION_CONFIDENCE_THRESHOLD = 0.2
 
 # YOLO 추적기 설정. track_id가 있어야 SpeedEstimator와 CrosswalkOccupancy가 사람별로 구분할 수 있다.
 DETECTION_TRACKER = "bytetrack.yaml"  # ultralytics 내장 추적기. 필요 시 "botsort.yaml"로 교체.
