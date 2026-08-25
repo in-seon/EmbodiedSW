@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from config import config
 from src.capture import CameraCapture
 from src.detection import PersonDetector
+from src.fall_detection import FallDetectionPipeline, roi_from_ratio, roi_from_zones
 from src.serial_comm import SerialComm
 from src.signal_extend import Occupant, SignalExtensionStateMachine
 from src.speed import SpeedEstimator
@@ -161,3 +162,98 @@ class SignalExtensionPipeline:
                     self.begin_new_cycle()
                 remaining = self.serial_comm.read_remaining_time()
                 self.process_frame(frame, remaining)
+
+
+@dataclass
+class FallAlarmResult:
+    """FallAlarmPipeline.process_frame 한 번의 결과."""
+
+    fall_confirmed: bool = False
+    confirmed_ids: set = field(default_factory=set)
+    people_count: int = 0
+    # 이번 프레임에 실제로 아두이노로 보낸 명령("ALERT"/"STOP") 또는 None.
+    # 매 프레임 보내지 않으므로 대부분의 프레임에서 None이다(SerialComm.update_alarm 참고).
+    command_sent: object = None
+
+
+class FallAlarmPipeline:
+    """목표 2 전용 파이프라인: 카메라 -> 검출 -> 쓰러짐 판정 -> 부저(아두이노).
+
+    SignalExtensionPipeline과 나눠 둔 이유는 **의존하는 것이 다르기 때문**이다.
+    신호 연장은 제어부가 잔여 녹색 시간과 사이클 시작을 알려줘야 판단할 수 있는데
+    그 메시지가 아직 팀 합의 전이라 동작하지 못한다. 반면 쓰러짐 알람은 파이 쪽에서
+    완결된다 — 카메라와 부저만 있으면 되고, 필요한 조각이 전부 이미 있다.
+
+    둘을 한 클래스에 넣으면 합의되지 않은 쪽 때문에 도는 쪽까지 못 돌게 된다.
+    제어부 프로토콜이 확정되면 SignalExtensionPipeline과 나란히 돌리면 된다
+    (검출기를 공유해 추론을 한 번만 하는 형태가 될 것이다).
+
+    ROI(어디까지를 '횡단보도 위'로 볼 것인가)는 두 경로가 있다:
+      - zones가 있으면 캘리브레이션된 네 꼭짓점을 감싸는 사각형(roi_from_zones) — 권장
+      - 없으면 화면 비율(FALL_CONFIG["crosswalk_roi"]) — 눈대중이라 부정확하다
+    """
+
+    def __init__(self, camera=None, detector=None, serial_comm=None,
+                 zones=None, roi_px=None, fall_detector=None):
+        self.camera = camera or CameraCapture()
+        self.detector = detector or PersonDetector()
+        self.serial_comm = serial_comm or SerialComm()
+        self.zones = zones
+        self.roi_px = roi_px
+        # ROI를 화면 비율로 잡는 경로는 프레임 크기를 알아야 하므로 첫 프레임까지 미룬다.
+        self._fall = fall_detector
+
+    def _fall_pipeline(self, frame):
+        if self._fall is None:
+            roi = self.roi_px
+            if roi is None:
+                roi = (
+                    roi_from_zones(self.zones) if self.zones is not None
+                    else roi_from_ratio(frame.shape)
+                )
+                self.roi_px = roi
+            self._fall = FallDetectionPipeline(roi)
+        return self._fall
+
+    def process_frame(self, frame, now=None) -> FallAlarmResult:
+        """한 프레임을 처리하고, 필요하면 부저 명령을 보낸다.
+
+        now: 판단 기준 시각(초). 생략하면 time.monotonic().
+             쓰러짐 판정과 알람 하트비트가 **같은 시계**를 쓰도록 한 값을 둘 다에 넘긴다.
+             원문 PoC는 time.time()을 썼지만 둘 다 '차이'만 쓰므로 동작은 같고,
+             monotonic은 시스템 시각이 조정돼도 뒤로 가지 않는다는 장점이 있다.
+        """
+        now = time.monotonic() if now is None else now
+
+        boxes = self.detector.detect(frame)
+        fall = self._fall_pipeline(frame).update(boxes, now)
+        command = self.serial_comm.update_alarm(fall["fall_confirmed"], now=now)
+
+        return FallAlarmResult(
+            fall_confirmed=fall["fall_confirmed"],
+            confirmed_ids=fall["confirmed_ids"],
+            people_count=len(fall["people"]),
+            command_sent=command,
+        )
+
+    def reset_alarm(self):
+        """오탐으로 부저가 계속 울릴 때의 탈출구 (원문 PoC의 'r' 키와 같다).
+
+        쓰러짐 누적을 지우고 부저도 즉시 끈다. 누적만 지우면 다음 프레임에 다시
+        확정될 수 있고, 부저만 끄면 파이 쪽 상태와 어긋난다 — 둘 다 해야 한다.
+        """
+        if self._fall is not None:
+            self._fall.reset()
+        self.serial_comm.update_alarm(False)
+
+    def run(self, on_result=None):
+        """실시간 루프. on_result(result, frame)이 주어지면 프레임마다 호출한다.
+
+        표시·로깅을 콜백으로 뺀 이유: 헤드리스(파이 SSH)와 창 모드가 필요한데,
+        그 차이를 파이프라인이 알 필요가 없다. main.py가 콜백으로 결정한다.
+        """
+        with self.camera, self.serial_comm:
+            for frame in self.camera.frames():
+                result = self.process_frame(frame)
+                if on_result is not None and on_result(result, frame) is False:
+                    break
