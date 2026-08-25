@@ -119,8 +119,21 @@ class SerialComm:
             self._conn = self._injected
         else:
             port = self.port or self._autodetect_port()
-            # timeout=0 -> 논블로킹 읽기 (모듈 docstring "왜 논블로킹인가" 참고)
-            self._conn = serial.Serial(port, self.baudrate, timeout=0)
+            try:
+                # timeout=0 -> 논블로킹 읽기 (모듈 docstring "왜 논블로킹인가" 참고)
+                self._conn = serial.Serial(port, self.baudrate, timeout=0)
+            except serial.SerialException as exc:
+                # pyserial의 원래 메시지는 원인을 거의 알려주지 않는다("could not open port").
+                # 실제로 겪는 원인은 대부분 아래 셋 중 하나다.
+                raise RuntimeError(
+                    f"시리얼 포트를 열 수 없습니다: {port}\n"
+                    f"  ({exc})\n"
+                    "  - 권한: 라즈베리파이에서는 사용자가 dialout 그룹에 있어야 합니다.\n"
+                    "      sudo usermod -aG dialout $USER   (실행 후 재로그인)\n"
+                    "  - 점유: 아두이노 IDE의 시리얼 모니터가 켜져 있으면 포트를 잡고 있습니다. 닫으세요.\n"
+                    "  - 포트: 케이블이 빠졌거나 이름이 바뀌었을 수 있습니다.\n"
+                    "      python tools/manual_buzzer_check.py --list 로 목록을 확인하세요."
+                ) from exc
             self.port = port
 
         self._rx = b""

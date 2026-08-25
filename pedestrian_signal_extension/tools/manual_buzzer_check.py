@@ -136,7 +136,9 @@ def main():
     parser.add_argument("--list", action="store_true", help="포트 목록만 출력하고 종료.")
     args = parser.parse_args()
 
-    if args.list or (args.port is None and not _has_single_port()):
+    # --port 없이도 SerialComm이 자동 탐색한다. 포트가 아예 없을 때만 미리 걸러
+    # "연결된 포트가 없다"를 보여준다(그 상태로 진행해봐야 같은 말을 하게 된다).
+    if args.list or (args.port is None and not _has_any_port()):
         print_ports()
         return
 
@@ -166,8 +168,8 @@ def main():
         comm.close()
 
 
-def _has_single_port() -> bool:
-    """--port 없이도 자동 탐색이 가능할지 미리 본다(실패 시 목록을 보여주기 위함)."""
+def _has_any_port() -> bool:
+    """연결된 시리얼 포트가 하나라도 있는가."""
     try:
         return len(SerialComm.available_ports()) >= 1
     except Exception:
