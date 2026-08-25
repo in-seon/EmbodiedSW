@@ -25,7 +25,7 @@ picam2.configure(picam2.create_preview_configuration(main={"format": "RGB888", "
 picam2.start()
 
 # YOLOv8n 모델 로드 (처음 실행 시 자동으로 다운로드됨)
-model = YOLO("yolov8n.pt")
+model = YOLO("yolov8n-pose.pt")
 
 while True:
     frame = picam2.capture_array()
