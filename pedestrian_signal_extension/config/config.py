@@ -6,6 +6,27 @@ placeholder로 두고, 실제 사용 지점에서 값이 None이면 에러를 �
 CLAUDE.md 6장 "팀과 논의가 필요한 미확정 사항" 참고.
 """
 
+from pathlib import Path
+
+# 이 파일(config/config.py)의 부모의 부모 = 프로젝트 루트.
+# 데이터 파일 경로를 실행 디렉터리와 무관하게 만드는 데 쓴다.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _weight_path(name: str) -> str:
+    """가중치 경로. 프로젝트 루트에 있으면 절대 경로로, 없으면 이름 그대로 돌려준다.
+
+    절대 경로로 만드는 이유: 상대 경로면 **실행 디렉터리에 따라 파일을 못 찾는다.**
+    리포 루트에서 `python pedestrian_signal_extension/main.py` 로 돌리면 ultralytics가
+    "없네" 하고 공개 가중치를 다시 내려받아 실행 위치마다 사본이 생긴다(6.5MB씩).
+    파인튜닝 가중치(yolo_detect_vulnerable.pt)는 내려받을 곳도 없어 그냥 실패한다.
+
+    없을 때 이름만 돌려주는 이유: 리포를 처음 클론했을 때 가중치가 없는 것이 정상이고
+    (*.pt 는 .gitignore 대상), 그때는 ultralytics 자동 다운로드가 동작해야 한다.
+    """
+    path = _PROJECT_ROOT / name
+    return str(path) if path.exists() else name
+
 # =====================================================================
 # 위치 기반(구역별) 신호 연장 — 담당 파트(목표 1) 핵심 설계
 # =====================================================================
@@ -62,7 +83,13 @@ PRIORITY_MAX_TOTAL_EXTENSION_SEC = None   # TODO(팀 확정 필요): 우선 연�
 # --- Zone 잔류/확정 판단 (CLAUDE.md 2.2) ---
 # 검출 흔들림에 대비해, 횡단보도(아무 구역) 안에서 이만큼 연속 검출돼야 "확정 보행자"로 본다.
 ZONE_RESIDENCY_FRAMES = None    # TODO(실측 필요): 실측 FPS 기반으로 튜닝.
-ZONE_CONFIG_PATH = "data/zone_config.json"  # tools/zone_calibrator.py 로 생성되는 zone 좌표 파일 경로.
+# tools/zone_calibrator.py 로 생성되는 zone 좌표 파일 경로.
+#
+# 프로젝트 루트를 기준으로 절대 경로를 만든다. 상대 경로("data/zone_config.json")로 두면
+# **어느 디렉터리에서 실행하느냐에 따라 파일을 못 찾는다.** 리포 루트에서
+# `python pedestrian_signal_extension/main.py` 로 돌리는 것이 자연스러운데, 그때 상대 경로는
+# 엉뚱한 곳을 가리키고 "캘리브레이션을 분명히 했는데 없다고 나온다"가 된다.
+ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "data" / "zone_config.json")
 
 # 검출이 몇 프레임 끊겨도 그 사람의 누적(잔류 카운트 / 속도 히스토리)을 버리지 않고 유지할지.
 #
@@ -191,7 +218,7 @@ PEDESTRIAN_LABEL = "person"     # COCO 클래스명. 파인튜닝 모델로 교�
 #   축소 모형(장난감 휠체어)은 아예 못 잡을 수 있다. 투자하기 전에
 #   `python tools/manual_camera_person_check.py --source 모형사진.jpg --aid-model 후보.pt`
 #   로 우리 모형에서 실제로 잡히는지부터 볼 것.
-MOBILITY_AID_MODEL_PATH = "yolo_detect_vulnerable.pt"   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
+MOBILITY_AID_MODEL_PATH = _weight_path("yolo_detect_vulnerable.pt")   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
 
 # 위 모델이 아는 클래스명 중 '교통약자'로 볼 것들. 모델마다 이름이 다르므로
 # `YOLO(경로).names` 로 확인한 뒤 채운다. 비어 있으면 모델이 아는 클래스를 전부 쓴다.
@@ -211,7 +238,7 @@ MOBILITY_AID_CONFIDENCE_THRESHOLD = 0.3
 # 함께 주므로, 신호 연장은 박스를, 쓰러짐 감지는 키포인트를 쓰면 된다.
 # 두 모델을 각각 돌리면 추론 비용이 2배가 되고, 그게 프레임 시간의 사실상 전부다.
 # (docs/decisions.md "2026-08-19: 검출 모델을 yolov8n-pose로 교체" 참고)
-DETECTION_MODEL_PATH = "yolov8n-pose.pt"  # 없으면 최초 실행 시 자동 다운로드(약 6.5MB).
+DETECTION_MODEL_PATH = _weight_path("yolov8n-pose.pt")  # 없으면 최초 실행 시 자동 다운로드(약 6.5MB).
 
 # ⚠️ 두 목표가 추론을 공유하므로 임계값도 하나를 공유한다. 팀원 PoC는 0.4, 목표 1은 0.5였다.
 # 낮은 쪽(0.4)을 택했다: 넘어지는 순간에는 bbox가 급변하고 신뢰도가 떨어져 검출이 빠지는데

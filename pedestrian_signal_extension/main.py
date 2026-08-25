@@ -57,6 +57,14 @@ def run_fall_mode(args):
     from src.zone import CrosswalkZones
 
     # zone 설정이 있으면 캘리브레이션된 꼭짓점으로 ROI를 잡는다(눈대중 비율보다 정확).
+    #
+    # 여기서는 **어떤 이유로든** zone을 못 읽으면 화면 비율로 물러난다. 쓰러짐 감지에
+    # zone은 정확도를 높여주는 선택지일 뿐 필수가 아니기 때문이다. 특히 해상도 불일치처럼
+    # 설정이 '있는데 유효하지 않은' 경우(ValueError)까지 여기서 죽으면, 쓰러짐 감지가
+    # 자기와 상관없는 신호 연장 쪽 설정 문제로 못 돌게 된다.
+    #
+    # 반대로 --mode full 은 zone이 없으면 구역 판정 자체가 불가능하므로 그대로 실패해야 한다.
+    # 그래서 이 관대한 처리는 fall 모드에만 있다.
     zones = None
     try:
         zones = CrosswalkZones.load()
@@ -64,6 +72,10 @@ def run_fall_mode(args):
     except FileNotFoundError:
         print("[안내] zone 설정이 없어 화면 비율(FALL_CONFIG['crosswalk_roi'])로 ROI를 잡습니다.")
         print("       tools/zone_calibrator.py 로 만들면 더 정확합니다.")
+    except (ValueError, KeyError, OSError) as exc:
+        print("[경고] zone 설정을 읽었지만 쓸 수 없습니다. 화면 비율로 ROI를 잡고 계속합니다.")
+        print(f"       사유: {exc}")
+        print("       쓰러짐 감지는 이대로도 동작하지만, --mode full 을 쓰려면 고쳐야 합니다.")
 
     serial_comm = None
     if args.no_serial:
