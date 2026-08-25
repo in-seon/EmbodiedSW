@@ -262,9 +262,32 @@ CAMERA_MOUNT_ANGLE_DEG = None   # TODO(실측 필요): 보행자 신호등 부�
 # =====================================================================
 # 주의: 제어부 ESP32 / 구동부 아두이노 우노 구성은 잠정안이며 바뀔 수 있다.
 # 그래서 아래 값은 전부 config로 분리해 두고, 보드가 바뀌어도 여기만 고치면 되게 한다.
-SERIAL_PORT = None       # TODO(팀 합의 필요): 실제 포트 (예: "/dev/ttyUSB0", "/dev/ttyACM0", "COM3").
-SERIAL_BAUDRATE = None   # TODO(팀 합의 필요): 보드레이트.
-SERIAL_MESSAGE_FORMAT = None  # TODO(팀 합의 필요): 메시지 포맷 스펙 (프레이밍, 필드 정의 등).
+# 부저·신호등 LED·7세그먼트를 한 보드가 담당하므로 시리얼 채널도 하나다.
+SERIAL_PORT = None       # None이면 open() 시 자동 탐색(아두이노 VID 우선). 고정하려면 "/dev/ttyACM0", "COM3" 등.
+SERIAL_BAUDRATE = 9600   # 아두이노 스케치의 Serial.begin(9600)과 일치해야 한다.
+
+# 메시지 포맷: 개행으로 끝나는 ASCII 한 줄. 상세 표는 src/serial_comm.py 모듈 docstring 참고.
+#   파이 -> 아두이노 : ALERT / STOP / PING
+#   아두이노 -> 파이 : READY / OK <명령> / PONG / ERR <명령> / TIMEOUT
+# 앞으로 추가될 신호 연장·7세그먼트도 같은 형식으로 얹는다(그래서 값이 "명령별 포맷"이 아니라 프레이밍 방식이다).
+SERIAL_MESSAGE_FORMAT = "ascii-lines"
+
+# 포트를 연 직후 아두이노가 리셋되어 부팅하는 동안 "READY"를 기다리는 시간(초).
+# Uno는 시리얼 포트가 열리면 DTR 신호로 자동 리셋되며 부트로더까지 약 1.5~2초가 걸린다.
+# 이 대기 없이 바로 명령을 보내면 부팅 중이라 그대로 유실된다.
+SERIAL_READY_TIMEOUT_SEC = 5.0
+
+# 쓰러짐 알람이 켜져 있는 동안 ALERT를 다시 보내는 주기(초).
+#
+# 아두이노 스케치에 TIMEOUT_MS = 30000 안전장치가 있어, 마지막 ALERT로부터 30초가 지나면
+# 부저가 스스로 멎는다. 파이가 살아 있는 동안 이 주기로 ALERT를 재전송하면 타임아웃이
+# 계속 갱신되어 30초를 넘겨도 울리고, 반대로 **파이가 죽거나 USB가 빠지면 30초 안에
+# 자동으로 멎는다.** 즉 이 값은 안전장치를 무력화하는 것이 아니라 워치독으로 바꾸는 값이다.
+#
+# 주의: 아두이노 쪽 handleCommand("ALERT")가 alarmStart를 매번 갱신해야 한다.
+# `if (!alarmOn) { ... alarmStart = millis(); }` 처럼 조건 안에 두면 재전송해도 갱신되지 않아
+# 첫 ALERT로부터 30초에 부저가 꺼진다.
+ALARM_HEARTBEAT_SEC = 10.0
 
 
 # =====================================================================
