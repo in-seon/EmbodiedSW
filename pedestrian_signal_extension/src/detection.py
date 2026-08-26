@@ -3,9 +3,10 @@
 CLAUDE.md 2.6: 실측 확인 결과 COCO 사전학습 yolov8n이 사람 모형을 "person"으로 검출했고
 신뢰도는 80%대였다. 따라서 추가 파인튜닝 없이 사전학습 가중치를 그대로 쓴다.
 
-교통약자(휠체어/목발/지팡이) 검출은 현재 보류다(CLAUDE.md 2.5). COCO에 해당 클래스가 없어
-config.MOBILITY_AID_LABELS가 빈 튜플이고, 그 결과 is_mobility_aid()는 항상 False가 된다.
-나중에 파인튜닝 모델이 생기면 config의 라벨만 채우면 되도록 인터페이스는 그대로 남겨둔다.
+교통약자(휠체어/목발/지팡이)는 **별도 가중치를 쓰는 MobilityAidDetector**가 맡는다(CLAUDE.md 2.5).
+사람 검출 가중치에는 해당 클래스가 없으므로 PersonDetector로는 원리상 잡을 수 없다.
+config.MOBILITY_AID_MODEL_PATH가 None이면 그 검출기는 조용히 비활성되어 빈 목록을 주고,
+결과적으로 SignalExtensionPipeline의 priority_mode가 항상 False가 된다.
 
 track_id는 YOLO.track(persist=True)가 부여한다. speed.py와 zone.py의 CrosswalkOccupancy가
 사람을 프레임 간에 구분하려면 이 ID가 필요하다.
@@ -54,22 +55,19 @@ class BoundingBox:
         return self.label == config.PEDESTRIAN_LABEL
 
     def is_mobility_aid(self) -> bool:
-        # MOBILITY_AID_LABELS가 빈 튜플인 동안(보류 상태)에는 항상 False.
+        """교통약자 보조기구 클래스인가.
+
+        MobilityAidDetector가 낸 박스에만 의미가 있다 — PersonDetector는 사람만 보므로
+        그쪽 박스에서는 항상 False다.
+        """
         return self.label in config.MOBILITY_AID_LABELS
 
 
-def is_mobility_aid_box(box: BoundingBox) -> bool:
-    """검출 결과가 교통약자 클래스인지 확인.
-
-    현재는 보류 상태라 항상 False다(CLAUDE.md 2.5). 파인튜닝 모델 도입 후 재개할 때,
-    지팡이(cane)는 사선·저해상도 조건에서 매우 작게 보여 검출률이 낮을 수 있으므로
-    별도 검증이 필요하다.
-    """
-    return box.is_mobility_aid()
-
-
 class PersonDetector:
-    """ultralytics YOLO 래퍼. 프레임당 추론 1회로 사람(+ 후일 교통약자)을 검출한다.
+    """ultralytics YOLO 래퍼. 프레임당 추론 1회로 **사람만** 검출한다.
+
+    교통약자 보조기구(휠체어/목발)는 이 검출기의 일이 아니다 — 사람 검출 가중치에 해당
+    클래스가 없어서 원리상 못 잡는다. 그쪽은 별도 가중치를 쓰는 MobilityAidDetector가 맡는다.
 
     detect()는 추적 ID가 붙은 BoundingBox 리스트를 반환한다. 모델을 파인튜닝 가중치로
     교체하더라도 이 시그니처가 유지되므로 zone/speed/signal_extend 쪽은 손댈 필요가 없다.
@@ -95,9 +93,14 @@ class PersonDetector:
         self._class_names = self._model.names
 
         # 관심 있는 클래스만 추론 단계에서 걸러 불필요한 박스를 만들지 않는다.
-        wanted = {config.PEDESTRIAN_LABEL, *config.MOBILITY_AID_LABELS}
+        #
+        # 여기에 교통약자 라벨을 섞지 않는다. 사람 검출 가중치(yolov8n-pose)에는 휠체어·목발
+        # 클래스가 없어서 넣어봐야 걸리는 것이 없고, "이 검출기도 교통약자를 본다"는 인상만
+        # 남아 실제 담당자(MobilityAidDetector)와 역할이 겹쳐 보이게 된다.
+        # 이 클래스는 사람만 본다.
         self._class_ids = sorted(
-            idx for idx, name in self._class_names.items() if name in wanted
+            idx for idx, name in self._class_names.items()
+            if name == config.PEDESTRIAN_LABEL
         )
         if not self._class_ids:
             raise ValueError(
@@ -194,6 +197,12 @@ class MobilityAidDetector:
             every_n_frames if every_n_frames is not None
             else config.MOBILITY_AID_EVERY_N_FRAMES
         )
+        # detect()가 이 값으로 나머지 연산을 하므로 0이면 ZeroDivisionError가 난다.
+        # 추론 주기를 0으로 두는 건 의미도 없으니 생성 시점에 막는다.
+        if self.every_n_frames is None or self.every_n_frames < 1:
+            raise ValueError(
+                f"every_n_frames는 1 이상이어야 합니다(1 = 매 프레임): {self.every_n_frames}"
+            )
         self._wanted = tuple(labels) if labels is not None else tuple(config.MOBILITY_AID_LABELS)
         self._frame_count = 0
         self._cached = []
@@ -230,7 +239,20 @@ class MobilityAidDetector:
     def _load_model(self, model_path):
         from ultralytics import YOLO   # 지연 임포트 (PersonDetector와 같은 이유)
 
-        return YOLO(model_path)
+        try:
+            return YOLO(model_path)
+        except Exception as exc:
+            # 여기서 걸리는 원인은 대부분 하나다: 가중치 파일이 실제로는 없는 것.
+            # 이름만 있고 파일이 없으면 ultralytics가 공개 허브에서 내려받으려 하는데,
+            # 파인튜닝 가중치는 허브에 없으므로 "무슨 소린지 모를" 에러로 끝난다.
+            raise RuntimeError(
+                f"교통약자 보조 모델을 열 수 없습니다: {model_path}\n"
+                f"  ({exc})\n"
+                "  - 파일이 실제로 그 경로에 있는지 확인하세요. 파인튜닝 가중치는 공개 허브에\n"
+                "    없으므로 자동 다운로드가 되지 않습니다(사람 검출용 yolov8n-pose.pt와 다릅니다).\n"
+                "  - 아직 후보 가중치가 없다면 config.MOBILITY_AID_MODEL_PATH = None 으로 두세요.\n"
+                "    보조 검출만 조용히 꺼지고 나머지는 그대로 동작합니다."
+            ) from exc
 
     def detect(self, frame) -> list[BoundingBox]:
         """교통약자 클래스 BoundingBox 목록. 추론을 건너뛴 프레임에서는 직전 결과를 준다.

@@ -189,6 +189,11 @@ def main():
         from config import config
         args.source = config.CAMERA_SOURCE
 
+    # argparse는 --source 0 을 문자열 "0"으로 준다. 그대로 넘기면 cv2가 0번 카메라가 아니라
+    # "0"이라는 파일을 열려고 해서 무조건 실패한다(src/capture.py의 normalize_source 참고).
+    from src.capture import normalize_source
+    args.source = normalize_source(args.source)
+
     if args.mode == "fall":
         run_fall_mode(args)
     else:

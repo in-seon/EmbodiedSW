@@ -19,9 +19,22 @@ import pytest
 from config import config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = PROJECT_ROOT.parent
 
 # 프로젝트 안에 있어야 하는 경로 설정들
 PATH_SETTINGS = ["ZONE_CONFIG_PATH", "DETECTION_MODEL_PATH", "MOBILITY_AID_MODEL_PATH"]
+
+# 설정별로 허용되는 뿌리.
+#
+# 가중치(*.pt)만 리포 루트까지 허용한다. 팀원 PoC(crosswalk_poc.py)가 리포 루트에서
+# 같은 가중치를 쓰고 있어서 파일이 실제로 거기 있고, 그걸 못 찾으면 ultralytics가
+# 같은 6.5MB를 실행 위치마다 다시 내려받는다(config._WEIGHT_DIRS 참고).
+# 그 외 데이터 경로는 여전히 프로젝트 안이어야 한다.
+ALLOWED_ROOTS = {
+    "ZONE_CONFIG_PATH": (PROJECT_ROOT,),
+    "DETECTION_MODEL_PATH": (PROJECT_ROOT, REPO_ROOT),
+    "MOBILITY_AID_MODEL_PATH": (PROJECT_ROOT, REPO_ROOT),
+}
 
 
 @pytest.mark.parametrize("name", PATH_SETTINGS)
@@ -42,16 +55,17 @@ def test_path_is_absolute_or_bare_name(name):
 
 @pytest.mark.parametrize("name", PATH_SETTINGS)
 def test_absolute_path_stays_inside_project(name):
-    """절대 경로라면 프로젝트 루트 안이어야 한다 — 드라이브 루트를 가리키면 안 된다."""
+    """절대 경로라면 허용된 뿌리 안이어야 한다 — 드라이브 루트를 가리키면 안 된다."""
     value = getattr(config, name)
     if value is None:
         pytest.skip(f"{name}이 설정되지 않음")
     path = Path(value)
     if not path.is_absolute():
         return  # 위 테스트가 다루는 '순수 파일명' 경우
-    assert path.is_relative_to(PROJECT_ROOT), (
-        f"{name}이 프로젝트 밖을 가리킵니다: {value!r}\n"
-        f"프로젝트 루트: {PROJECT_ROOT}\n"
+    roots = ALLOWED_ROOTS[name]
+    assert any(path.is_relative_to(root) for root in roots), (
+        f"{name}이 허용된 범위 밖을 가리킵니다: {value!r}\n"
+        f"허용된 뿌리: {[str(r) for r in roots]}\n"
         "경로 조각에 앞 슬래시가 붙어 있지 않은지 확인하세요"
         '(Path(root) / "/data" 는 root를 버립니다).'
     )

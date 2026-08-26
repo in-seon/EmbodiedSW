@@ -7,12 +7,19 @@
 import numpy as np
 import pytest
 
+from config import config
 from src.detection import BoundingBox
+from src.fall_detection import FallDetectionPipeline
 from src.pipeline import FallAlarmPipeline
 
 FRAME = np.zeros((480, 640, 3), dtype=np.uint8)
-# FALL_CONFIG["crosswalk_roi"] = (0.15, 0.30, 0.85, 0.95) -> 640x480에서 (96,144)~(544,456)
+# config.FALL_CONFIG["crosswalk_roi"] = (0.15, 0.30, 0.85, 0.95) -> 640x480에서 (96,144)~(544,456)
 ROI = (96, 144, 544, 456)
+
+# 아래 시나리오가 "3초 유지 -> ALERT", "3초 정상 -> STOP" 타임라인에 기대고 있으므로
+# 시간 파라미터는 테스트가 소유한다. 그래야 config.FALL_CONFIG 튜닝이 배선 테스트를
+# 깨뜨리지 않는다(test_fall_detection.py의 CFG와 같은 이유).
+CFG = dict(config.FALL_CONFIG, fall_confirm_sec=3.0, fall_clear_sec=3.0)
 
 
 class FakeDetector:
@@ -73,6 +80,7 @@ def build(frames, serial=None):
         detector=FakeDetector(frames),
         serial_comm=spy,
         roi_px=ROI,
+        fall_detector=FallDetectionPipeline(ROI, cfg=CFG),
     )
     return pipeline, spy
 

@@ -18,13 +18,15 @@
     구역·속도·상한을 갖춘 `src/signal_extend.py`를 쓰고 있어서 둘이 동시에 돌면 충돌한다.
     이 파일은 "쓰러짐이 확정됐는가"까지만 책임지고, 그 신호를 어떻게 쓸지는 호출부가 정한다.
 
-## 추론을 공유하려면
+## 추론 공유
 
-`config.DETECTION_MODEL_PATH`를 `"yolov8n-pose.pt"`로 바꾸면 PersonDetector가 키포인트까지
-채워 준다(`BoundingBox.keypoints`). 그러면 프레임당 추론 1회로 두 목표가 다 돌아간다.
-기본값은 아직 `yolov8n.pt`다 — 목표 1의 모델 선정은 실측으로 확정된 사항이라
-(CLAUDE.md 2.6) 포즈 모델로 바꾸려면 라즈베리파이에서 FPS를 다시 재고 팀과 합의해야 한다.
-키포인트가 없으면 `looks_fallen`이 bbox 가로/세로 비율 폴백으로 동작한다(원문 그대로).
+`config.DETECTION_MODEL_PATH`는 이미 `yolov8n-pose.pt`라, PersonDetector가 사람 박스와 함께
+키포인트를 채워 준다(`BoundingBox.keypoints`). 프레임당 추론 1회로 두 목표가 다 돌아간다.
+키포인트가 없는 가중치로 되돌리면 `looks_fallen`이 bbox 가로/세로 비율 폴백으로 동작한다(원문 그대로).
+
+## 판단 파라미터
+
+전부 `config.FALL_CONFIG`에서 온다. 이 파일에는 값이 없다 — 튜닝은 config에서만 한다.
 
 ## ROI
 
@@ -38,38 +40,18 @@ from collections import deque
 
 import numpy as np
 
+from config import config
+
 
 # ============================================================
-# 설정 — crosswalk_poc.py의 CONFIG 중 쓰러짐 감지에 쓰이는 항목만 값·주석 그대로 옮김
+# 설정 — config.FALL_CONFIG 한 곳에서만 온다
 # ============================================================
-FALL_CONFIG = {
-    # 데모 셋업 후 실측으로 조정. 이 박스 안 = "횡단보도 위"
-    "crosswalk_roi": (0.15, 0.30, 0.85, 0.95),
-
-    # --- 쓰러짐 판정 ---
-    "fall_angle_deg": 50.0,       # 몸통 축이 수직에서 이만큼 기울면 후보
-    "fall_confirm_sec": 3.0,      # 이 시간 유지돼야 사이렌 확정 (3초 안에 일어나면 오탐으로 무시)
-    "fall_gap_sec": 1.0,          # 확정 전, 이 시간 이내의 짧은 미검출은 무시하고 카운트 이어감 (저 fps 깜빡임 대응)
-    "fall_gap_frames": 2,         # 위 갭의 하한을 '실측 프레임 간격 x N'으로도 잡는다.
-                                  # 고정 1초만 쓰면 프레임 간격이 1초를 넘는 보드에서
-                                  # 한 프레임 깜빡임에 후보가 취소돼 쓰러짐을 영영 확정 못 한다.
-    "fall_gap_max_sec": 4.0,      # 적응 상한 (fps가 병적으로 낮을 때 폭주 방지)
-    "fall_clear_sec": 3.0,        # 확정 후, '정상 자세 or ROI 이탈'이 이 시간 연속돼야 사이렌 해제 (깜빡임 방지)
-    "fall_aspect_ratio": 1.3,     # bbox 가로/세로 비율 보조 판정
-    "fall_roi_overlap": 0.3,      # 쓰러짐 판정용 ROI 겹침 비율 (발 한 점이 아니라 몸 전체 기준)
-
-    # --- 트랙 ID 유지 ---
-    # 넘어지는 순간 bbox 모양이 급변해 트래커가 ID를 새로 달면 누적이 리셋된다.
-    # 직전에 사라진 트랙과 충분히 겹치는 새 트랙은 그 상태를 물려받는다.
-    "track_grace_sec": 1.5,
-    "track_grace_frames": 2,      # fall_gap_frames와 같은 이유의 적응 하한.
-                                  # 고정 1.5초만 쓰면 프레임 간격이 1.5초를 넘는 순간
-                                  # '직전 프레임'조차 유예 밖으로 밀려나, ID가 빠진
-                                  # 검출이 매번 새 사람이 되고 누적이 영영 안 쌓인다.
-                                  # 유예의 단위는 '초'가 아니라 '프레임 수'여야 한다.
-    "track_grace_max_sec": 4.0,   # 적응 상한 (오래전 사람의 상태를 물려받는 것 방지)
-    "track_inherit_overlap": 0.3,   # 교집합/작은쪽넓이 기준 (IoU 아님 — bbox_overlap 주석 참고)
-}
+# 예전에는 이 파일에도 같은 dict가 복사돼 있었고, 아래 기본값이 그 사본을 가리켰다.
+# 그래서 config/config.py의 값을 아무리 고쳐도 **실행에는 전혀 반영되지 않았다**
+# (에러가 나지 않으니 "왜 파라미터가 안 먹지"로만 보였다). 사본을 지우고 config를 직접 쓴다.
+# docs/team_interface.md의 "파라미터 config 일원화" 항목이 약속하는 상태가 이것이다.
+#
+# 값을 바꾸려면 config/config.py의 FALL_CONFIG를 고칠 것. 여기에 다시 복사하지 말 것.
 
 # ============================================================
 # ↓↓↓ 여기부터 crosswalk_poc.py 원문 그대로 (수정 금지) ↓↓↓
@@ -415,7 +397,7 @@ def roi_from_ratio(frame_shape, ratio=None):
 
     frame_shape: numpy 프레임의 .shape (H, W, ...) 또는 (H, W).
     """
-    ratio = ratio if ratio is not None else FALL_CONFIG["crosswalk_roi"]
+    ratio = ratio if ratio is not None else config.FALL_CONFIG["crosswalk_roi"]
     h, w = frame_shape[0], frame_shape[1]
     return (int(ratio[0] * w), int(ratio[1] * h), int(ratio[2] * w), int(ratio[3] * h))
 
@@ -454,7 +436,9 @@ class FallDetectionPipeline:
     """
 
     def __init__(self, roi_px, cfg=None):
-        self.cfg = cfg if cfg is not None else FALL_CONFIG
+        # 기본값은 config.FALL_CONFIG. cfg를 직접 주는 것은 테스트에서 특정 파라미터를
+        # 고정할 때만 쓴다(운영 값 튜닝이 테스트를 깨지 않게 하기 위함).
+        self.cfg = cfg if cfg is not None else config.FALL_CONFIG
         self.roi_px = roi_px
         self.tracker = FallTracker(self.cfg)
 

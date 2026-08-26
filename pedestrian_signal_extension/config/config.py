@@ -12,9 +12,17 @@ from pathlib import Path
 # 데이터 파일 경로를 실행 디렉터리와 무관하게 만드는 데 쓴다.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+# 가중치(*.pt)를 찾아볼 디렉터리. 순서대로 먼저 있는 것을 쓴다.
+#
+# 리포 루트까지 보는 이유: 실제로 가중치가 거기에 있다. 팀원 PoC(crosswalk_poc.py)가
+# 리포 루트에서 돌면서 같은 yolov8n-pose.pt를 쓰기 때문에, 이 하위 폴더 안만 뒤지면
+# **바로 옆에 있는 파일을 못 찾고** ultralytics가 같은 6.5MB를 다시 내려받는다.
+# 아래 _weight_path의 설명이 막으려던 상황이 그대로 벌어지고 있었다.
+_WEIGHT_DIRS = (_PROJECT_ROOT, _PROJECT_ROOT.parent)
+
 
 def _weight_path(name: str) -> str:
-    """가중치 경로. 프로젝트 루트에 있으면 절대 경로로, 없으면 이름 그대로 돌려준다.
+    """가중치 경로. _WEIGHT_DIRS에서 찾으면 절대 경로로, 없으면 이름 그대로 돌려준다.
 
     절대 경로로 만드는 이유: 상대 경로면 **실행 디렉터리에 따라 파일을 못 찾는다.**
     리포 루트에서 `python pedestrian_signal_extension/main.py` 로 돌리면 ultralytics가
@@ -24,8 +32,11 @@ def _weight_path(name: str) -> str:
     없을 때 이름만 돌려주는 이유: 리포를 처음 클론했을 때 가중치가 없는 것이 정상이고
     (*.pt 는 .gitignore 대상), 그때는 ultralytics 자동 다운로드가 동작해야 한다.
     """
-    path = _PROJECT_ROOT / name
-    return str(path) if path.exists() else name
+    for directory in _WEIGHT_DIRS:
+        path = directory / name
+        if path.exists():
+            return str(path)
+    return name
 
 # =====================================================================
 # 위치 기반(구역별) 신호 연장 — 담당 파트(목표 1) 핵심 설계
@@ -71,12 +82,17 @@ REMAINING_TIME_THRESHOLD_SEC = 5
 # 운영 사례의 상한값. 즉 한 사이클에서 최대 10초까지만 늘린다 (docs/decisions.md 참고).
 MAX_TOTAL_EXTENSION_SEC = 10
 
-# --- 교통약자(휠체어/목발 등) 우선 연장 — 현재 보류 (CLAUDE.md 2.5) ---
-# 검출 수단이 없어(MOBILITY_AID_LABELS = ()) priority_mode가 항상 False이므로 아래 값은 지금 쓰이지 않는다.
-# 파인튜닝 모델이 생기면 재개한다. 설계 의도는 아래 그대로 유지:
-# "처음부터 시간을 넉넉하게 준다"는 부분은 제어부가 기본 녹색시간을 늘리는 방식으로 구현하고
-# (파이 -> 제어부로 priority 플래그 전달), 파이 쪽 연장 규칙은 아래 값으로 차등한다.
-# 미정이면 None으로 두고, 이 경우 state machine은 일반 규칙(ZONE_EXTENSION_SEC)으로 대체 동작한다.
+# --- 교통약자(휠체어/목발 등) 우선 연장 (CLAUDE.md 2.5) ---
+# 배선은 완료됐다: MobilityAidDetector -> SignalExtensionPipeline.priority_mode
+# -> SignalExtensionStateMachine.evaluate(priority_mode=...). 아래 두 값만 채우면 바로 동작한다.
+#
+# 다만 **아래가 None인 동안에는 priority_mode가 켜져도 연장 시간이 달라지지 않는다.**
+# state machine이 일반 규칙(ZONE_EXTENSION_SEC / MAX_TOTAL_EXTENSION_SEC)으로 조용히
+# 대체 동작하기 때문이다(임의 추정치로 차등하지 않기 위한 안전한 폴백). 즉 지금 상태는
+# "휠체어를 인식은 하되 더 길게 연장하지는 않는" 단계다.
+#
+# 설계 의도: "처음부터 시간을 넉넉하게 준다"는 부분은 제어부가 기본 녹색시간을 늘리는
+# 방식으로 구현하고(파이 -> 제어부로 priority 플래그 전달), 파이 쪽 연장 규칙은 아래 값으로 차등한다.
 PRIORITY_ZONE_EXTENSION_SEC = None       # TODO(팀 확정 필요): 우선 연장 구역별 차등 맵 {1:.., 2:.., ...}.
 PRIORITY_MAX_TOTAL_EXTENSION_SEC = None   # TODO(팀 확정 필요): 우선 연장 시 별도(더 높은) 상한.
 
@@ -210,7 +226,9 @@ PEDESTRIAN_LABEL = "person"     # COCO 클래스명. 파인튜닝 모델로 교�
 
 # --- 교통약자(휠체어/목발/지팡이) 보조 검출 — CLAUDE.md 2.5 ---
 # 사람 검출과 같은 모델로는 못 잡는다(COCO에도 yolov8n-pose에도 해당 클래스가 없다).
-# 그래서 **별도 가중치를 쓰는 두 번째 모델**로 처리한다.
+# 그래서 **별도 가중치를 쓰는 두 번째 모델**(src/detection.py의 MobilityAidDetector)로 처리하고,
+# 그 결과가 SignalExtensionPipeline의 priority_mode가 된다.
+# PersonDetector는 사람만 본다 — 아래 라벨을 사람 검출 쪽 클래스 필터에 섞지 않는다.
 #
 # 왜 모델 두 개를 감수하는가:
 #   추론이 프레임 시간의 사실상 전부라(실측 약 4,400:1) 매 프레임 두 번 돌리면 FPS가 반토막 난다.
