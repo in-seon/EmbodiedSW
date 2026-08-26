@@ -13,9 +13,9 @@
 import numpy as np
 import pytest
 
+from config import config
 from src.detection import BoundingBox
 from src.fall_detection import (
-    FALL_CONFIG,
     FallDetectionPipeline,
     FallMonitor,
     FallTracker,
@@ -31,6 +31,14 @@ from src.fall_detection import (
 from src.zone import CrosswalkZones
 
 ROI = (0, 0, 640, 480)          # 화면 전체를 횡단보도로 보는 단순 ROI
+
+# 이 파일은 **판단 로직**(원문 이식 충실도)을 고정하는 테스트지, 운영 튜닝값을 고정하는
+# 테스트가 아니다. 그래서 아래 시간 파라미터만 명시적으로 못박고 나머지는 config를 따른다.
+#
+# 못박지 않으면 현장에서 config.FALL_CONFIG의 fall_confirm_sec을 조정할 때마다 아래 시나리오
+# ("3초 유지돼야 확정", "3초 안에 일어나면 무시")가 통째로 깨진다. 검증하려는 것은 '3초'라는
+# 값이 아니라 "confirm_sec을 채워야 확정된다"는 동작이므로, 값은 테스트가 소유하는 편이 맞다.
+CFG = dict(config.FALL_CONFIG, fall_confirm_sec=3.0, fall_clear_sec=3.0)
 
 
 def standing(x=100, y=100, w=40, h=120, track_id=1):
@@ -103,8 +111,8 @@ def test_roi_from_zones_covers_calibrated_quad():
 
 def test_lying_person_is_fall_candidate_by_aspect_ratio():
     """키포인트가 없으면 bbox 가로/세로 비율로 폴백 판정한다."""
-    assert looks_fallen(lying(), FALL_CONFIG) is True
-    assert looks_fallen(standing(), FALL_CONFIG) is False
+    assert looks_fallen(lying(), CFG) is True
+    assert looks_fallen(standing(), CFG) is False
 
 
 def test_torso_angle_needs_confident_keypoints():
@@ -129,7 +137,7 @@ def test_bbox_overlap_uses_smaller_area_not_iou():
 
 def test_fall_confirmed_only_after_confirm_sec():
     """쓰러진 자세가 fall_confirm_sec(3초) 유지돼야 사이렌이 확정된다."""
-    monitor = FallMonitor(FALL_CONFIG)
+    monitor = FallMonitor(CFG)
 
     assert monitor.update(True, now=0.0, gap_sec=1.0) is False
     assert monitor.update(True, now=2.9, gap_sec=1.0) is False
@@ -138,7 +146,7 @@ def test_fall_confirmed_only_after_confirm_sec():
 
 def test_getting_up_within_confirm_sec_does_not_trigger():
     """3초 안에 일어나면 오탐으로 보고 사이렌을 울리지 않는다."""
-    monitor = FallMonitor(FALL_CONFIG)
+    monitor = FallMonitor(CFG)
 
     monitor.update(True, now=0.0, gap_sec=1.0)
     monitor.update(True, now=1.5, gap_sec=1.0)
@@ -148,7 +156,7 @@ def test_getting_up_within_confirm_sec_does_not_trigger():
 
 def test_short_detection_gap_does_not_reset_candidate():
     """저 fps에서 한 프레임 깜빡이는 미검출은 후보 카운트를 리셋하지 않는다."""
-    monitor = FallMonitor(FALL_CONFIG)
+    monitor = FallMonitor(CFG)
 
     monitor.update(True, now=0.0, gap_sec=1.0)
     monitor.update(False, now=0.5, gap_sec=1.0)     # 갭 이내의 짧은 미검출
@@ -157,7 +165,7 @@ def test_short_detection_gap_does_not_reset_candidate():
 
 def test_siren_needs_sustained_clear_to_release():
     """확정 후에는 정상 자세가 fall_clear_sec(3초) 연속돼야 사이렌이 꺼진다."""
-    monitor = FallMonitor(FALL_CONFIG)
+    monitor = FallMonitor(CFG)
     for t in (0.0, 1.5, 3.0):
         monitor.update(True, now=t, gap_sec=1.0)
     assert monitor.confirmed is True
@@ -168,7 +176,7 @@ def test_siren_needs_sustained_clear_to_release():
 
 def test_two_people_do_not_accumulate_together():
     """서로 다른 사람의 짧은 이상 자세가 합산돼 사이렌이 울리면 안 된다."""
-    tracker = FallTracker(FALL_CONFIG)
+    tracker = FallTracker(CFG)
 
     # A가 1.6초, 이어서 B가 1.6초 — 각자는 3초 미만이므로 확정되면 안 된다.
     tracker.update([lying(x=0, track_id=1)], [True], [True], now=0.0)
@@ -184,7 +192,7 @@ def test_state_is_inherited_when_tracker_drops_id():
     UR Fall 실측에서 확인된 실패 모드 — 이 보정이 없으면 낙상 구간만 쏙 빠져
     영영 확정되지 않는다.
     """
-    tracker = FallTracker(FALL_CONFIG)
+    tracker = FallTracker(CFG)
 
     tracker.update([lying(track_id=1)], [True], [True], now=0.0)
     tracker.update([lying(track_id=None)], [True], [True], now=1.5)   # ID 유실
@@ -197,7 +205,7 @@ def test_state_is_inherited_when_tracker_drops_id():
 
 def test_pipeline_confirms_fall_from_bounding_boxes():
     """BoundingBox 목록만 넣으면 쓰러짐 확정까지 나온다(원문 main() 루프와 같은 순서)."""
-    pipeline = FallDetectionPipeline(roi_px=ROI)
+    pipeline = FallDetectionPipeline(roi_px=ROI, cfg=CFG)
     box = BoundingBox(100, 100, 220, 140, 0.9, "person", track_id=1)   # 가로로 긴 = 누움
 
     assert pipeline.update([box], now=0.0)["fall_confirmed"] is False
@@ -210,7 +218,7 @@ def test_pipeline_confirms_fall_from_bounding_boxes():
 
 
 def test_pipeline_ignores_standing_person():
-    pipeline = FallDetectionPipeline(roi_px=ROI)
+    pipeline = FallDetectionPipeline(roi_px=ROI, cfg=CFG)
     box = BoundingBox(100, 100, 140, 220, 0.9, "person", track_id=1)   # 세로로 긴 = 서 있음
 
     for t in (0.0, 1.5, 3.0, 5.0):
@@ -222,7 +230,7 @@ def test_pipeline_ignores_standing_person():
 
 def test_pipeline_reports_foot_in_roi_separately():
     """신호 연장용 '발 위치' 판정과 쓰러짐용 '몸 전체 겹침'은 별개 기준이다."""
-    pipeline = FallDetectionPipeline(roi_px=(0, 0, 200, 200))
+    pipeline = FallDetectionPipeline(roi_px=(0, 0, 200, 200), cfg=CFG)
     inside = BoundingBox(50, 50, 90, 170, 0.9, "person", track_id=1)     # 발 y=170 -> ROI 안
     outside = BoundingBox(50, 300, 90, 420, 0.9, "person", track_id=2)   # 발 y=420 -> ROI 밖
 
@@ -238,7 +246,7 @@ def test_fallen_person_whose_feet_left_roi_still_triggers_siren():
     자세에 따라 크게 튀는데, 발 한 점으로 쓰러짐까지 판정하면 하필 쓰러진 순간에
     ROI 밖으로 빠져 사이렌을 놓친다. 몸 전체 겹침은 자세가 변해도 안 튄다.
     """
-    pipeline = FallDetectionPipeline(roi_px=(0, 0, 200, 200))
+    pipeline = FallDetectionPipeline(roi_px=(0, 0, 200, 200), cfg=CFG)
     # ROI 아래 경계에 걸친 누운 사람: 발(110, 210)은 ROI 밖, 몸은 83% 겹침.
     straddling = BoundingBox(50, 150, 170, 210, 0.9, "person", track_id=1)
 
@@ -254,7 +262,7 @@ def test_fallen_person_whose_feet_left_roi_still_triggers_siren():
 
 def test_pipeline_reset_clears_siren():
     """수동 리셋(원문 'r' 키)으로 사이렌 상태를 초기화할 수 있다."""
-    pipeline = FallDetectionPipeline(roi_px=ROI)
+    pipeline = FallDetectionPipeline(roi_px=ROI, cfg=CFG)
     box = BoundingBox(100, 100, 220, 140, 0.9, "person", track_id=1)
     for t in (0.0, 1.5, 3.0):
         pipeline.update([box], now=t)

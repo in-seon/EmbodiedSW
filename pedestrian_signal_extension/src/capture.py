@@ -118,6 +118,24 @@ def _is_picamera2_source(source) -> bool:
     return isinstance(source, str) and source.strip().lower() == PICAMERA2_SOURCE
 
 
+def normalize_source(source):
+    """명령줄에서 온 소스 문자열을 백엔드가 기대하는 타입으로 바꾼다.
+
+    바꾸는 것은 하나뿐이다: **웹캠 인덱스는 문자열이 아니라 정수여야 한다.**
+    `cv2.VideoCapture("0")`은 0번 카메라가 아니라 **"0"이라는 이름의 파일**을 열려고 해서
+    무조건 실패한다. argparse는 뭐든 문자열로 주므로, 중간에 이 변환이 없으면
+    `--source 0` 이 "카메라를 열 수 없습니다"로 끝난다.
+
+    "picamera2" / 영상 파일 경로 / http URL 은 문자열 그대로 통과시킨다.
+    """
+    if isinstance(source, str):
+        try:
+            return int(source)
+        except ValueError:
+            return source
+    return source
+
+
 class CameraCapture:
     """소스 종류에 맞는 백엔드를 골라 프레임을 공급한다.
 

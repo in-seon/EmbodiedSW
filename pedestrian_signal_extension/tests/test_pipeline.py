@@ -52,12 +52,36 @@ class FakeSerial:
         self.sent.append((extension_sec, priority))
 
 
+class FakeAidDetector:
+    """교통약자 보조 모델 대역. 가중치 없이 '보조기구가 보였는가'만 흉내낸다.
+
+    기본값(빈 목록)은 config.MOBILITY_AID_MODEL_PATH가 None일 때의 실제 동작과 같다.
+    """
+
+    def __init__(self, frames=None):
+        self.frames = list(frames) if frames is not None else []
+        self.calls = 0
+
+    def detect(self, frame):
+        if not self.frames:
+            return []
+        boxes = self.frames[min(self.calls, len(self.frames) - 1)]
+        self.calls += 1
+        return boxes
+
+
+def aid_box(label="wheelchair"):
+    """보조 모델이 내는 박스. track_id가 없다(predict()라 추적을 안 붙인다)."""
+    return BoundingBox(x1=0, y1=0, x2=20, y2=40, confidence=0.5, label=label)
+
+
 def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH_CM,
-                   threshold_sec=5, max_total_sec=20):
+                   threshold_sec=5, max_total_sec=20, aid_frames=None):
     zones = CrosswalkZones.from_quad(CORNERS, n=5, width_cm=width_cm, length_cm=length_cm)
     return SignalExtensionPipeline(
         camera=object(),
         detector=FakeDetector(frames),
+        aid_detector=FakeAidDetector(aid_frames),
         zones=zones,
         occupancy=CrosswalkOccupancy(zones, confirm_frames=confirm_frames),
         state_machine=SignalExtensionStateMachine(
@@ -194,16 +218,54 @@ def test_unconfirmed_pedestrian_does_not_extend():
     assert third.extension_sec == ZONE_EXT[3]
 
 
-# --- 교통약자 보류 상태 ---
+# --- 교통약자 우선 연장 (priority_mode) ---
 
-def test_priority_mode_off_while_mobility_aids_are_shelved():
-    """MOBILITY_AID_LABELS가 비어 있는 동안(보류) 우선 연장 모드는 켜지지 않는다."""
+def test_priority_mode_off_when_aid_model_is_absent():
+    """보조 모델이 없으면(가중치 미설정) 우선 연장 모드는 켜지지 않는다."""
+    pipeline = build_pipeline([[box_at(50, 100, 1)]])          # aid_frames 없음 = 비활성
+    result = pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0)
+
+    assert result.priority_mode is False
+    assert result.mobility_aid_count == 0
+
+
+def test_priority_mode_comes_from_aid_detector_not_person_detector():
+    """우선 연장 판단은 **보조 모델** 결과에서만 나온다.
+
+    사람 검출 가중치(yolov8n-pose)에는 휠체어 클래스가 아예 없으므로, 사람 검출 결과에서
+    교통약자를 찾는 구조였을 때는 MOBILITY_AID_MODEL_PATH에 가중치를 채워 넣어도
+    priority_mode가 영원히 False였다. 그 회귀를 막는다.
+    """
+    # 사람 검출 쪽에 'wheelchair' 라벨이 섞여 들어와도 그것만으로는 켜지지 않는다.
+    boxes = [box_at(50, 100, 1), box_at(60, 100, 2, label="wheelchair")]
+    pipeline = build_pipeline([boxes])
+    assert pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0).priority_mode is False
+
+    # 보조 모델이 잡았을 때만 켜진다.
+    pipeline = build_pipeline([[box_at(50, 100, 1)]], aid_frames=[[aid_box()]])
+    result = pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0)
+    assert result.priority_mode is True
+    assert result.mobility_aid_count == 1
+
+
+def test_priority_flag_is_forwarded_to_controller():
+    """priority_mode는 제어부 전송까지 그대로 실려 나가야 한다.
+
+    제어부가 기본 녹색시간을 늘리는 쪽(CLAUDE.md 2.5)을 담당하므로, 파이가 이 플래그를
+    흘리지 않으면 우선 연장 설계의 절반이 사라진다.
+    """
+    pipeline = build_pipeline([[box_at(50, 100, 1)]], aid_frames=[[aid_box()]])
+    pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0)
+
+    assert pipeline.serial_comm.sent == [(ZONE_EXT[3], True)]
+
+
+def test_person_boxes_are_not_polluted_by_aid_labels():
+    """'wheelchair' 박스는 사람이 아니므로 보행자 목록에 들어가지 않는다."""
     boxes = [box_at(50, 100, 1), box_at(60, 100, 2, label="wheelchair")]
     pipeline = build_pipeline([boxes])
     result = pipeline.process_frame(None, remaining_time_sec=3, timestamp=0.0)
 
-    assert result.priority_mode is False
-    # 'wheelchair' 박스는 사람이 아니므로 보행자 목록에도 들어가지 않는다.
     assert [p.track_id for p in result.pedestrians] == [1]
 
 

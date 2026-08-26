@@ -3,13 +3,19 @@
 흐름 (CLAUDE.md 4장):
 
     프레임
-      -> PersonDetector.detect()              yolov8n, track_id 부여
-      -> box.foot_point()                     bbox 하단 모서리 중심 = 지면 접점
-      ├-> CrosswalkZones.locate()             몇 번 구역(1~5)인지
-      │   -> CrosswalkOccupancy               확정 보행자 / 점유 구역
-      └-> SpeedEstimator.update_many()        평면 좌표 변화율로 속도/방향/예상 통과 시간
-      -> SignalExtensionStateMachine.evaluate()  점유 구역으로 연장 시간 결정
+      -> PersonDetector.detect()              yolov8n-pose, track_id 부여
+      │  -> box.foot_point()                  bbox 하단 모서리 중심 = 지면 접점
+      │  ├-> CrosswalkZones.locate()          몇 번 구역(1~5)인지
+      │  │   -> CrosswalkOccupancy            확정 보행자 / 점유 구역
+      │  └-> SpeedEstimator.update_many()     평면 좌표 변화율로 속도/방향/예상 통과 시간
+      -> MobilityAidDetector.detect()         휠체어/목발 여부 -> priority_mode (저빈도 추론)
+      -> SignalExtensionStateMachine.evaluate()  점유 구역 + priority로 연장 시간 결정
       -> SerialComm.send_extend_signal()      제어부로 전송
+
+검출기가 둘인 이유는 가중치가 다르기 때문이다. 사람 검출용 pose 모델에는 휠체어·목발
+클래스가 아예 없어서 같은 추론으로는 못 잡는다(CLAUDE.md 2.5). 대신 보조 모델은
+'있냐 없냐'만 보면 되므로 매 프레임이 아니라 config.MOBILITY_AID_EVERY_N_FRAMES 마다
+한 번만 돌린다 — src/detection.py의 MobilityAidDetector 참고.
 
 속도 반영은 config.USE_SPEED_FOR_EXTENSION으로 켜고 끈다(기본 False, CLAUDE.md 2.3).
 켜면 구역별 연장 시간이 '상한'이 되고, 실제 연장은 그 사람이 정말 모자란 만큼으로 줄어든다.
@@ -25,7 +31,7 @@ from dataclasses import dataclass, field
 
 from config import config
 from src.capture import CameraCapture
-from src.detection import PersonDetector
+from src.detection import MobilityAidDetector, PersonDetector
 from src.fall_detection import FallDetectionPipeline, roi_from_ratio, roi_from_zones
 from src.serial_comm import SerialComm
 from src.signal_extend import Occupant, SignalExtensionStateMachine
@@ -57,14 +63,23 @@ class FrameResult:
     # 추적 ID가 붙지 않아 잔류/속도 판정에서 제외한 검출 수. 0이 아닌 값이 계속 나오면
     # 추적이 불안정하다는 뜻이고, 그만큼 연장 조건을 놓치고 있다는 뜻이다.
     untracked_count: int = 0
+    # 보조 모델이 이번 프레임에 본 교통약자 보조기구(휠체어/목발 등) 개수.
+    # priority_mode가 켜졌는데 이 값이 0이면 배선이 잘못된 것이고, 반대로 이 값만
+    # 계속 튀면 보조 모델의 오탐이다 — 둘을 구분할 수 있어야 현장에서 원인을 찾는다.
+    mobility_aid_count: int = 0
 
 
 class SignalExtensionPipeline:
     def __init__(self, camera=None, detector=None, zones=None, occupancy=None,
-                 state_machine=None, serial_comm=None, speed_estimator=None):
+                 state_machine=None, serial_comm=None, speed_estimator=None,
+                 aid_detector=None):
         # 인자로 주입하지 않으면 config 기반 기본 객체를 만든다(테스트에선 가짜 객체 주입 가능).
         self.camera = camera or CameraCapture()
         self.detector = detector or PersonDetector()
+        # 교통약자(휠체어/목발) 보조 검출. 사람 검출과 **다른 가중치**를 쓴다 — pose 모델에는
+        # 해당 클래스가 없어서 PersonDetector로는 원리상 못 잡는다(CLAUDE.md 2.5).
+        # config.MOBILITY_AID_MODEL_PATH가 None이면 조용히 비활성되어 항상 빈 목록을 준다.
+        self.aid_detector = aid_detector if aid_detector is not None else MobilityAidDetector()
         self.zones = zones or CrosswalkZones.load()
         self.occupancy = occupancy or CrosswalkOccupancy(self.zones)
         self.state_machine = state_machine or SignalExtensionStateMachine()
@@ -109,9 +124,18 @@ class SignalExtensionPipeline:
             for box in boxes
             if box.is_pedestrian()
         ]
-        # 교통약자가 하나라도 검출되면 우선 연장 모드.
-        # 현재는 MOBILITY_AID_LABELS가 비어 있어(보류) 항상 False다 — CLAUDE.md 2.5.
-        priority_mode = any(box.is_mobility_aid() for box in boxes)
+        # 교통약자 보조기구가 하나라도 보이면 우선 연장 모드.
+        #
+        # 판단 근거를 **보조 모델 쪽에서만** 가져오는 것이 중요하다. 예전에는 사람 검출
+        # 결과(boxes)에서 is_mobility_aid()를 봤는데, 사람 검출 가중치(yolov8n-pose)에는
+        # 휠체어 클래스 자체가 없어서 그 조건은 원리상 절대 참이 되지 않았다. 즉
+        # MOBILITY_AID_MODEL_PATH에 가중치를 채워 넣어도 파이프라인은 그걸 쓰지 않았다.
+        #
+        # 지금은 '사람이 어디 있나'(PersonDetector)와 '보조기구가 있나'(MobilityAidDetector)로
+        # 역할이 갈린다. 보조 모델은 매 프레임 돌지 않고(MOBILITY_AID_EVERY_N_FRAMES)
+        # 그 사이엔 직전 결과를 재사용하므로, 추론 비용은 크게 늘지 않는다.
+        aid_boxes = self.aid_detector.detect(frame)
+        priority_mode = bool(aid_boxes)
 
         confirmed = self.occupancy.update(detections)
         occupied = self.occupancy.occupied_zones()
@@ -151,6 +175,7 @@ class SignalExtensionPipeline:
             priority_mode=priority_mode,
             speed_unit=self.speed.unit,
             untracked_count=self.occupancy.untracked_count,
+            mobility_aid_count=len(aid_boxes),
         )
 
     def run(self):

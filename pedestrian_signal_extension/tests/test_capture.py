@@ -117,3 +117,39 @@ def test_missing_picamera2_gives_actionable_error():
     camera = CameraCapture(source=PICAMERA2_SOURCE)
     with pytest.raises(RuntimeError, match="Picamera2"):
         camera.open()
+
+
+# --- normalize_source (명령줄 소스 문자열 -> 백엔드가 기대하는 타입) ---
+
+def test_normalize_source_converts_webcam_index_to_int():
+    """--source 0 이 문자열로 남으면 cv2가 '0'이라는 파일을 열려다 실패한다."""
+    from src.capture import normalize_source
+
+    assert normalize_source("0") == 0
+    assert normalize_source("1") == 1
+
+
+def test_normalize_source_leaves_non_numeric_sources_alone():
+    from src.capture import normalize_source
+
+    assert normalize_source("picamera2") == "picamera2"
+    assert normalize_source("clips/test.mp4") == "clips/test.mp4"
+    assert normalize_source("http://raspberrypi.local:8000/") == "http://raspberrypi.local:8000/"
+    assert normalize_source(0) == 0
+    assert normalize_source(None) is None
+
+
+def test_main_normalizes_webcam_index_before_opening_camera():
+    """main.py가 변환을 빼먹으면 --source 0 이 통째로 안 돈다 — 그 회귀를 막는다.
+
+    main()은 실행하면 카메라·시리얼을 잡으므로 호출하지 않고, normalize_source를
+    거치는지만 본다(함수 안 지연 import든 모듈 상단 import든 통과).
+    """
+    import main
+    from src.capture import CameraCapture, normalize_source
+
+    assert CameraCapture(source=normalize_source("0")).backend_name == "cv2"
+    assert (
+        "normalize_source" in main.main.__code__.co_names
+        or hasattr(main, "normalize_source")
+    ), "main()이 --source를 normalize_source로 변환하지 않습니다."
