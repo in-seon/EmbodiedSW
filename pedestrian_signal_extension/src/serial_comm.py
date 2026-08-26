@@ -1,30 +1,40 @@
 """라즈베리파이 <-> 아두이노(제어부) 시리얼 통신.
 
 부저·신호등 LED·7세그먼트를 **한 보드**가 담당하므로 시리얼 채널도 하나다.
-이 파일이 그 채널 전체를 맡는다.
 
 ## 프로토콜: 개행으로 끝나는 ASCII 한 줄
 
-    파이 -> 아두이노      아두이노 -> 파이
-    ---------------      --------------------------
-    ALERT                READY       (부팅 완료)
-    STOP                 OK <명령>   (수락함)
-    PING                 PONG
-                         ERR <명령>  (모르는 명령)
-                         TIMEOUT     (워치독이 알람을 껐음)
+    파이 -> 아두이노              아두이노 -> 파이
+    -------------------------    --------------------------
+    NORMAL                       READY   (부팅 완료)
+    EXTEND <초> <ETA초|->        PONG    (PING에 대한 답)
+    FALL                         ERR <명령>  (모르는 명령)
+    PING
 
-지금 구현된 것은 쓰러짐 알람(ALERT/STOP)과 연결 확인(PING)뿐이다. 신호 연장·잔여 시간·
-사이클 이벤트는 아직 팀 합의 전이라 아래쪽에 스텁으로 남아 있다.
+예: `NORMAL` / `EXTEND 5 7.2` / `EXTEND 3 -` / `FALL`
 
-## 나중에 명령을 추가하는 법 — 고칠 곳은 두 군데뿐이다
+## 파이는 '무엇을 보았는가'만 보내고, '언제 적용할까'는 아두이노가 정한다
 
-    파이 -> 아두이노 : 메서드 하나를 만들고 _send("EXTEND 5") 를 호출
-    아두이노 -> 파이 : _handle_line() 에 분기 하나를 추가
+    파이   : 구역 판정, 잔류 확정, 쓰러짐 확정  -> 위 세 상태로 요약
+    아두이노: 잔여 녹색 시간, 임계값 판단, 누적 상한, 사이클 리셋
 
-수신을 poll() 한 곳으로 모아 둔 이유가 이것이다. 한 채널로 여러 종류의 줄이 섞여 오므로,
-"필요할 때 readline() 한 번" 방식으로 짜면 명령이 늘어날 때마다 서로의 응답을 잡아먹는다
-(예: 잔여 시간을 읽으려다 OK ALERT를 먹어버림). 도착한 줄을 전부 회수해 종류별로
-분류하는 지점이 하나면 그런 일이 생기지 않는다.
+"남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 쪽만 답할 수 있고, "이 사람이 몇 번
+구역에 있나"는 영상을 보는 쪽만 답할 수 있다. 각자 자기만 아는 것을 판단하도록 나눴다.
+
+## ETA를 함께 보내는 이유
+
+속도 기반 보정은 `연장 = min(구역값, ceil(ETA x 안전계수 - 잔여시간))` 인데, 파이는
+잔여시간을 모른다. 그래서 **두 숫자를 다 가진 아두이노**가 그 뺄셈을 한다. 파이는 ETA를
+실어 보내기만 하고, `config.USE_SPEED_FOR_EXTENSION`이 False면 자리에 `-`를 넣는다.
+
+구역값이 상한으로 남으므로 **속도는 연장을 깎기만 하고 늘리지 않는다.** ETA가 없거나(`-`)
+이상하게 커도 구역값을 넘을 수 없다.
+
+## 전송 정책
+
+상태가 바뀔 때 즉시, 그리고 config.SERIAL_STATE_HEARTBEAT_SEC 마다 한 번 더 보낸다.
+자세한 이유는 update_state() 참고. 아두이노는 상태 메시지에 **응답하지 않는 것이 좋다**
+(응답 송신 시간이 아두이노 루프를 묶는다). PING에만 PONG으로 답하면 된다.
 
 ## 왜 논블로킹인가
 
@@ -44,6 +54,12 @@ from config import config
 #   0x2341 Arduino SA, 0x2A03 Arduino org, 0x1A86 CH340 클론, 0x0403 FTDI
 _ARDUINO_VIDS = (0x2341, 0x2A03, 0x1A86, 0x0403)
 
+# 파이가 보낼 수 있는 상태. 문자열을 여기 모아 두어 오타로 조용히 어긋나지 않게 한다.
+# 우선순위: FALL > EXTEND > NORMAL (쓰러진 사람이 있으면 연장 요구보다 그쪽이 급하다).
+STATE_NORMAL = "NORMAL"
+STATE_EXTEND = "EXTEND"
+STATE_FALL = "FALL"
+
 
 class SerialComm:
     """제어부 아두이노와의 단일 시리얼 채널.
@@ -60,7 +76,8 @@ class SerialComm:
             else config.SERIAL_READY_TIMEOUT_SEC
         )
         self.heartbeat_sec = (
-            heartbeat_sec if heartbeat_sec is not None else config.ALARM_HEARTBEAT_SEC
+            heartbeat_sec if heartbeat_sec is not None
+            else config.SERIAL_STATE_HEARTBEAT_SEC
         )
         if self.baudrate is None:
             raise NotImplementedError(
@@ -69,9 +86,10 @@ class SerialComm:
 
         self._injected = connection
         self._conn = None
-        self._rx = b""              # 아직 개행을 못 만난 수신 바이트
-        self._alarm_on = False      # 파이가 아는 알람 상태 (아두이노 실제 상태의 추정)
-        self._last_alert_sent = 0.0
+        self._rx = b""                    # 아직 개행을 못 만난 수신 바이트
+        # 마지막으로 보낸 (상태, 연장초). 변화 감지에 쓴다 — ETA는 일부러 넣지 않는다.
+        self._last_state_key = (None, None)
+        self._last_state_sent = 0.0
         self.ready = False          # READY 또는 PONG을 받아 연결이 확인됐는지
         self.recent_lines = []      # 최근 수신 줄 (진단·도구 표시용, 최대 50줄)
 
@@ -137,7 +155,7 @@ class SerialComm:
             self.port = port
 
         self._rx = b""
-        self._alarm_on = False
+        self._last_state_key = (None, None)
         self.ready = False
         self._wait_until_ready()
         return self
@@ -174,16 +192,18 @@ class SerialComm:
         )
 
     def close(self):
-        """알람을 끄고 포트를 닫는다.
+        """NORMAL로 되돌리고 포트를 닫는다.
 
-        STOP을 먼저 보내는 이유: 파이 쪽 프로그램이 끝나도 아두이노는 계속 울린다.
-        30초 워치독이 결국 끄긴 하지만, 그때까지 부저가 울리는 건 그냥 고장으로 보인다.
+        NORMAL을 먼저 보내는 이유: 파이 쪽 프로그램이 끝나도 아두이노는 마지막 상태를
+        그대로 들고 있다. FALL로 끝나면 부저가 계속 울리고, EXTEND로 끝나면 다음 사이클에
+        의도치 않은 연장이 붙는다. 아두이노의 무신호 워치독이 결국 되돌리겠지만,
+        그때까지의 동작은 그냥 고장으로 보인다.
         """
         if self._conn is None:
             return
         try:
-            if self._alarm_on:
-                self._send("STOP")
+            if self._last_state_key[0] not in (None, STATE_NORMAL):
+                self._send(STATE_NORMAL)
                 if hasattr(self._conn, "flush"):
                     self._conn.flush()
         except Exception:
@@ -191,7 +211,7 @@ class SerialComm:
         finally:
             self._conn.close()
             self._conn = None
-            self._alarm_on = False
+            self._last_state_key = (None, None)
             self.ready = False
 
     def __enter__(self):
@@ -240,18 +260,15 @@ class SerialComm:
         if line == "READY" or line == "PONG":
             self.ready = True
             if line == "READY":
-                # 아두이노가 방금 재부팅했다 -> 알람 상태도 초기화됐다.
-                self._alarm_on = False
-        elif line == "TIMEOUT":
-            # 워치독이 알람을 껐다. 파이 쪽 상태를 맞춰 두어야, 알람이 계속 필요한
-            # 상황이면 다음 update_alarm()에서 곧바로 ALERT를 다시 보낸다.
-            self._alarm_on = False
-        # 앞으로 추가할 것:
-        #   elif line.startswith("REMAIN "):  self._remaining_sec = int(line[7:])
-        #   elif line == "CYCLE":             self._cycle_started = True
+                # 아두이노가 방금 재부팅했다 -> 저쪽 상태가 초기화됐으므로 우리가 아는
+                # '마지막으로 보낸 상태'도 무효다. 비워 두면 다음 update_state()가
+                # 하트비트를 기다리지 않고 곧바로 현재 상태를 다시 보낸다.
+                self._last_state_key = (None, None)
+        # 아두이노 -> 파이 방향으로 메시지가 늘어나면 여기에 분기를 추가한다.
+        # (잔여 시간·사이클은 제어부가 소유하므로 파이로 올려보낼 필요가 없다.)
 
     # ------------------------------------------------------------------
-    # 쓰러짐 알람 (구현 완료)
+    # 상태 전송 — 이 채널의 본체
     # ------------------------------------------------------------------
 
     def ping(self) -> bool:
@@ -260,102 +277,66 @@ class SerialComm:
         self.poll()
         return self.ready
 
-    def alert(self):
-        """ALERT를 **무조건** 보낸다 (수동 조작·진단용).
+    @staticmethod
+    def format_state(state: str, extend_sec=None, eta_sec=None) -> str:
+        """보낼 한 줄을 만든다. 전송과 분리해 둔 이유는 테스트·도구가 그대로 쓰기 위함이다.
 
-        update_alarm()은 엣지 트리거라 이미 켜져 있으면 아무것도 보내지 않는다. 그 동작은
-        실시간 루프에는 맞지만, 사람이 키를 눌러 확인하는 상황에서는 "눌렀는데 아무 일도
-        안 일어난다"로 보여 진단을 방해한다. 그래서 강제 전송 경로를 따로 둔다.
+            NORMAL
+            EXTEND 5 7.2
+            EXTEND 3 -
+            FALL
         """
-        self._send("ALERT")
-        self._alarm_on = True
-        self._last_alert_sent = time.monotonic()
+        if state != STATE_EXTEND:
+            return state
+        if extend_sec is None:
+            raise ValueError("EXTEND 상태에는 연장 초가 필요합니다.")
+        eta_text = "-" if eta_sec is None else f"{eta_sec:.1f}"
+        return f"{STATE_EXTEND} {int(extend_sec)} {eta_text}"
 
-    def stop(self):
-        """STOP을 **무조건** 보낸다 (수동 조작·진단용)."""
-        self._send("STOP")
-        self._alarm_on = False
+    def send_state(self, state: str, extend_sec=None, eta_sec=None, now=None) -> str:
+        """상태를 **무조건** 한 줄 보낸다 (수동 조작·진단용).
 
-    def update_alarm(self, active: bool, now=None):
-        """쓰러짐 알람 상태를 아두이노에 반영한다. 매 프레임 호출하는 것을 전제로 한다.
+        평상시 루프에서는 update_state()를 쓸 것 — 그쪽이 변화 감지와 하트비트를 한다.
 
-        active: 쓰러짐이 확정된 상태인가 (FallDetectionPipeline의 fall_confirmed).
+        now를 받는 이유: 하트비트 시각을 여기서 찍는데, 호출자가 쓰는 시계와 다르면
+        주기가 어긋난다. 테스트에서 시각을 주입할 수 있어야 하는 이유이기도 하다.
+        """
+        line = self.format_state(state, extend_sec, eta_sec)
+        self._send(line)
+        self._last_state_key = (state, extend_sec)
+        self._last_state_sent = time.monotonic() if now is None else now
+        return line
 
-        전송 규칙:
-          - 꺼짐 -> 켜짐 : ALERT
-          - 켜진 동안    : heartbeat_sec마다 ALERT 재전송 (아두이노 30초 워치독 갱신)
-          - 켜짐 -> 꺼짐 : STOP
+    def update_state(self, state: str, extend_sec=None, eta_sec=None, now=None):
+        """상태를 반영한다. 매 프레임 호출하는 것을 전제로 한다.
 
-        매 프레임 ALERT를 보내지 않는 이유는 신호 연장의 엣지 트리거와 같다 — 9600bps에
-        초당 수십 줄을 밀어 넣으면 버퍼가 밀리고, 정작 필요한 다른 메시지가 뒤로 밀린다.
+        전송 규칙 — **상태가 바뀔 때 즉시, 그리고 heartbeat_sec마다 한 번 더.**
 
-        반환: 이번에 실제로 보낸 명령("ALERT"/"STOP") 또는 None.
+          - 매 프레임 보내지 않는 이유: 9600bps에 초당 수십 줄을 밀어 넣으면 아두이노의
+            64바이트 수신 버퍼가 넘치고, 아두이노가 응답까지 하면 그 송신 시간에 루프가
+            묶인다. 정작 중요한 순간의 메시지가 뒤로 밀린다.
+          - 그럼에도 주기적으로 재전송하는 이유: 변화 시에만 보내면 그 한 줄을 놓쳤을 때
+            아두이노가 **영영 옛 상태로 남는다.** 1초마다 같은 상태를 다시 보내면 유실이
+            자동으로 복구되고, 아두이노는 "N초간 아무것도 안 왔다 -> 파이가 죽었다"를
+            워치독으로 쓸 수 있다.
+
+        **변화 판정에 ETA는 넣지 않는다.** ETA는 사람이 걷는 동안 매 프레임 조금씩 변하므로
+        그것까지 비교하면 결국 매 프레임 전송이 된다. 대신 보낼 때마다 최신 ETA를 싣는다.
+        아두이노는 '잔여 5초 미만'인 순간에만 ETA를 쓰므로 1초 신선도면 충분하다.
+
+        반환: 이번에 실제로 보낸 줄 또는 None.
         """
         now = time.monotonic() if now is None else now
         self.poll()
 
-        if active:
-            if not self._alarm_on:
-                self._send("ALERT")
-                self._alarm_on = True
-                self._last_alert_sent = now
-                return "ALERT"
-            if now - self._last_alert_sent >= self.heartbeat_sec:
-                self._send("ALERT")           # 워치독 갱신
-                self._last_alert_sent = now
-                return "ALERT"
-            return None
-
-        if self._alarm_on:
-            self._send("STOP")
-            self._alarm_on = False
-            return "STOP"
+        key = (state, extend_sec)
+        if key != self._last_state_key:
+            return self.send_state(state, extend_sec, eta_sec, now=now)
+        if now - self._last_state_sent >= self.heartbeat_sec:
+            return self.send_state(state, extend_sec, eta_sec, now=now)
         return None
 
     @property
-    def alarm_on(self) -> bool:
-        """파이가 아는 현재 알람 상태."""
-        return self._alarm_on
-
-    # ------------------------------------------------------------------
-    # 신호 연장 (팀 합의 전 — 스텁)
-    # ------------------------------------------------------------------
-
-    def read_remaining_time(self) -> int:
-        """아두이노가 보내는 현재 잔여 녹색 시간(초).
-
-        구현하려면: 아두이노가 `REMAIN <초>` 를 주기적으로 보내게 하고, _handle_line()에
-        분기를 추가해 마지막 값을 저장한 뒤 여기서 돌려주면 된다. 전송 주기와 명령 이름만
-        팀과 맞추면 되고, 이 파일의 구조는 그대로다.
-        """
-        raise NotImplementedError(
-            "잔여 녹색 시간 메시지(REMAIN <초>)가 팀과 합의되지 않아 구현 보류. "
-            "합의되면 _handle_line()에 분기 하나를 추가하면 된다."
-        )
-
-    def read_cycle_started(self) -> bool:
-        """새 보행 신호 사이클(녹색 시작)이 시작됐는지 여부.
-
-        신호 사이클의 소유자는 제어부이므로 이 이벤트도 제어부가 알려줘야 한다. 파이가
-        잔여 시간의 증감만 보고 추측하면(예: "시간이 갑자기 늘면 새 사이클") 우리가 방금
-        요청한 연장이 반영된 것과 구분할 수 없다.
-
-        이 값이 없으면 누적 연장이 사이클을 넘어 남아, 한 번 상한을 찍은 뒤로는 영구히
-        연장이 안 된다. 구현하려면 아두이노가 `CYCLE` 한 줄을 보내게 하면 된다.
-        """
-        raise NotImplementedError(
-            "제어부 -> 파이 '새 사이클 시작' 이벤트(CYCLE)가 팀과 합의되지 않아 구현 보류. "
-            "이 값이 없으면 누적 연장이 사이클을 넘어 남는다(SignalExtensionPipeline.begin_new_cycle)."
-        )
-
-    def send_extend_signal(self, extension_sec: int, priority: bool = False):
-        """신호 연장 정보를 아두이노로 전달한다.
-
-        구현하려면 `self._send(f"EXTEND {extension_sec}")` 한 줄이면 되지만, 아두이노 쪽이
-        이 명령을 어떻게 처리할지(누적인지 절대값인지, priority를 어떻게 반영할지)가
-        먼저 합의돼야 한다. 누적/절대값을 잘못 맞추면 연장량이 의도의 몇 배가 된다.
-        """
-        raise NotImplementedError(
-            "연장 명령(EXTEND <초>)의 의미(누적/절대값)와 priority 처리 방식이 "
-            "팀과 합의되지 않아 구현 보류."
-        )
+    def last_state(self):
+        """파이가 마지막으로 보낸 (상태, 연장초). 아직 아무것도 안 보냈으면 (None, None)."""
+        return self._last_state_key

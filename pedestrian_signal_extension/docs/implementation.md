@@ -44,12 +44,13 @@
         └───────────┬───────────────────┘                           │
                     ▼                                               │
             signal_extend.py                                        │
-            evaluate(잔여시간, [Occupant(구역, ETA)])                 │
+            ZoneExtensionRule.required_sec([Occupant(구역, ETA)])     │
             → 연장 초(int)                                          │
                     │                                               │
                     ▼                                               ▼
             serial_comm.py                                  (미구현: 텔레그램 신고)
-            send_extend_signal()                            docs/team_interface.md 참고
+            update_state(NORMAL | EXTEND <초> <ETA> | FALL)  docs/team_interface.md 참고
+            ▸ 변화 시 + 1초 하트비트에만 실제 전송
 ```
 
 **핵심 구조 두 가지**
@@ -108,73 +109,82 @@ python tools/zone_calibrator.py --source picamera2 --width-cm 90 --length-cm 300
 
 ---
 
-## 2. 실시간 루프 — `main.py` → `SignalExtensionPipeline.run()`
+## 2. 실시간 루프 — `main.py`
 
-```python
-# main.py
-pipeline = SignalExtensionPipeline()   # ← 여기서 모든 구성요소가 만들어진다
-pipeline.run()
+```bash
+python main.py --mode full     # 쓰러짐 + 신호 연장 (기본)
+python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 ```
 
-### 2.1 생성 순서와 실패 지점 (`SignalExtensionPipeline.__init__`)
+### 2.1 파이가 하는 일 / 아두이노가 하는 일
 
-순서대로 만들어지며, **하나라도 조건이 안 맞으면 그 자리에서 멈춘다.**
+파이는 **"무엇을 보았는가"**만 보낸다. **"언제 연장할까"는 아두이노가 정한다.**
+잔여 녹색 시간을 7세그먼트로 직접 세는 쪽만 그 판단을 할 수 있기 때문이다
+(→ `docs/decisions.md` 2026-08-26, 계약은 `docs/team_interface.md`).
 
-| # | 만드는 것 | 실패 조건 | 예외 |
+| 파이 → 아두이노 | 언제 |
+|---|---|
+| `NORMAL` | 연장 요구 없음 (아무도 없거나 양 끝 구역만) |
+| `EXTEND <초> <ETA\|->` | 확정 보행자가 가운데 구역에 있음 |
+| `FALL` | 쓰러짐 확정 |
+
+전송은 **상태가 바뀔 때 + 1초 하트비트**. ETA는 변화 판정에서 제외한다(매 프레임 변하므로).
+
+### 2.2 생성 순서와 실패 지점
+
+**하나라도 조건이 안 맞으면 그 자리에서 멈춘다.** 이 예외들은 버그가 아니라
+**"이 값을 아직 안 정했다"는 알림**이며, 메시지에 무엇을 채워야 하는지 적혀 있다.
+
+| 만드는 것 | 실패 조건 | 예외 | `--mode fall`도 막힘? |
 |---|---|---|---|
-| 1 | `CameraCapture()` | — (생성만, 열기는 `run()`에서) | — |
-| 2 | `PersonDetector()` | `DETECTION_MODEL_PATH is None` | `NotImplementedError` |
-| | | 모델에 `PEDESTRIAN_LABEL` 클래스 없음 | `ValueError` |
-| 3 | `CrosswalkZones.load()` | `data/zone_config.json` 없음 | `FileNotFoundError` |
-| | | `frame_size` ≠ `CAMERA_RESOLUTION` | `ValueError` |
-| | | `corners`/`zones` 키 둘 다 없음 | `ValueError` |
-| 4 | `CrosswalkOccupancy(zones)` | `ZONE_RESIDENCY_FRAMES is None` | `NotImplementedError` |
-| 5 | `SignalExtensionStateMachine()` | `REMAINING_TIME_THRESHOLD_SEC` 또는 `MAX_TOTAL_EXTENSION_SEC`가 `None` | `NotImplementedError` |
-| | | `USE_SPEED_FOR_EXTENSION=True`인데 `ETA_SAFETY_MARGIN is None` | `NotImplementedError` |
-| 6 | `SerialComm()` | `SERIAL_PORT` 또는 `SERIAL_BAUDRATE`가 `None` | `NotImplementedError` |
-| 7 | `SpeedEstimator(ground_plane=zones.ground_plane)` | `SPEED_WINDOW_SEC <= 0` / `SPEED_MIN_SAMPLES < 2` | `ValueError` |
+| `PersonDetector()` | `DETECTION_MODEL_PATH is None` | `NotImplementedError` | ✅ |
+| | 모델에 `PEDESTRIAN_LABEL` 클래스 없음 | `ValueError` | ✅ |
+| `CrosswalkZones.load()` | zone 설정 없음 / 해상도 불일치 | `FileNotFoundError` / `ValueError` | ❌ 경고 후 화면 비율로 폴백 |
+| `CrosswalkOccupancy()` | `ZONE_RESIDENCY_FRAMES is None` | `NotImplementedError` | ❌ `--confirm-frames`로 우회 가능 |
+| `SerialComm()` | `SERIAL_BAUDRATE is None` | `NotImplementedError` | ✅ |
+| | 아두이노가 READY/PONG을 안 보냄 | `RuntimeError` | ✅ `--no-serial`이면 건너뜀 |
+| `SpeedEstimator()` | `SPEED_WINDOW_SEC <= 0` / `SPEED_MIN_SAMPLES < 2` | `ValueError` | ❌ |
 
-> 이 예외들은 **버그가 아니라 "이 값을 아직 안 정했다"는 알림**이다.
-> 메시지에 무엇을 채워야 하는지 적혀 있다.
+> `--mode fall`이 zone 설정 문제에 관대한 이유: 쓰러짐 감지에 zone은 ROI 정확도를
+> 높여주는 선택지일 뿐이다. 신호 연장 쪽 설정 문제로 쓰러짐까지 못 돌게 할 이유가 없다.
+> 반대로 `--mode full`은 zone이 없으면 구역 판정 자체가 불가능하므로 그대로 실패한다.
 
-### 2.2 매 프레임 실행 순서 (`run()`)
+### 2.3 매 프레임 실행 순서 (`CombinedPipeline.process_frame`)
 
 ```
 반복:
-  ① frame = camera.read_frame()                    ▸ None이면 루프 종료
-  ② if serial_comm.read_cycle_started():           ▸ 새 사이클이면
-         pipeline.begin_new_cycle()                   누적 연장·잔류·속도 전부 초기화
-  ③ remaining = serial_comm.read_remaining_time()  ← 제어부가 소유하는 값
-  ④ pipeline.process_frame(frame, remaining)
+  ① frame = camera.read_frame()                        ▸ None이면 루프 종료
+  ② boxes     = detector.detect(frame)                 [추론 1회 — 전체 시간의 99.6%]
+     aid_boxes = aid_detector.detect(frame)            [N프레임마다 1회, 없으면 빈 목록]
+  ③ fall = fall_pipeline.process_boxes(boxes, frame)   키포인트 → 몸통 각도 → 확정 여부
+  ④ ext  = ext_pipeline.process_boxes(boxes, aid_boxes) 발 위치 → 구역 → 필요한 연장 초
+  ⑤ state = FALL if fall.confirmed else ext.serial_state()
+  ⑥ serial_comm.update_state(state, 연장초, ETA)       ▸ 변화 시 + 1초마다만 실제 전송
 ```
 
-⚠️ 현재 ②③은 `NotImplementedError`를 던진다(프로토콜 미합의). 즉 **`run()`은 아직 못 돈다.**
-비전 파트만 보려면 `tools/manual_camera_person_check.py`를 쓴다.
+**②가 이 구조의 핵심이다.** 두 판정이 각자 `detect()`를 부르면 추론이 2배가 되고,
+실측상 추론이 프레임 시간의 99.6%(82.4ms vs 나머지 0.35ms)라 FPS가 그대로 반토막 난다.
+포즈 모델 하나로 박스와 키포인트를 함께 받는 설계(→ `decisions.md` 2026-08-19)가
+여기서 실제로 지켜진다.
 
-### 2.3 `process_frame()` 내부 — 실제 판단 순서
+**⑤ 우선순위는 FALL > EXTEND > NORMAL.** 채널이 하나이므로 상태도 하나다. 쓰러진 사람이
+있으면 연장 요구보다 그쪽이 급하다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
+
+### 2.4 연장 요구를 만드는 순서 (`SignalExtensionPipeline.process_boxes`)
 
 ```
-process_frame(frame, remaining_time_sec, timestamp=None)
-
- 1. timestamp가 None이면 time.monotonic()  ─────────── 테스트에선 직접 주입
- 2. boxes = detector.detect(frame)                     [추론 1회]
- 3. detections = [(track_id, foot_point) for 사람 박스]
- 4. priority_mode = 교통약자 박스가 하나라도 있는가     ▸ 현재 항상 False (보류)
- 5. confirmed = occupancy.update(detections)           {track_id: 구역번호}
-    occupied  = occupancy.occupied_zones()             [1,3] 처럼 정렬된 구역 목록
- 6. speeds = speed.update_many(detections, timestamp)  {track_id: TrackSpeed}
- 7. pedestrians = [PedestrianState(...)]               화면 표시·로깅용
- 8. occupants = [Occupant(구역, ETA) for 확정 보행자]
- 9. extension_sec = state_machine.evaluate(remaining, occupants, priority_mode)
-10. if extension_sec > 0:
-        serial_comm.send_extend_signal(extension_sec, priority=priority_mode)
-11. return FrameResult(...)
+ 1. detections = [(track_id, foot_point) for 사람 박스]
+ 2. priority_mode = 보조 모델이 교통약자를 봤는가
+ 3. confirmed = occupancy.update(detections)       {track_id: 구역번호} — 잔류 확정된 사람만
+ 4. speeds    = speed.update_many(detections, t)   {track_id: TrackSpeed}
+ 5. occupants = [Occupant(구역, ETA) for 확정 보행자]
+ 6. extension_sec = rule.required_sec(occupants, priority_mode)   구역값 중 최댓값
+ 7. eta_sec = rule.max_eta_sec(occupants)          ▸ USE_SPEED_FOR_EXTENSION이 True일 때만
+ 8. return FrameResult(...)
 ```
 
-**중요**: 9번에 들어가는 것은 `occupied`(전체 검출)가 아니라 **확정 보행자만**이다.
-`ZONE_RESIDENCY_FRAMES`를 못 채운 검출은 연장을 발동시키지 못한다.
-
----
+**중요**: 6번에 들어가는 것은 전체 검출이 아니라 **확정 보행자만**이다.
+`ZONE_RESIDENCY_FRAMES`를 못 채운 검출은 연장 요구를 만들지 못한다.
 
 ## 3. 파일별 입출력 상세
 
@@ -434,16 +444,19 @@ int만 주면 `eta_sec=None`으로 해석한다.
 
 **상태값**
 
-| 상태 | 의미 |
-|---|---|
-| `NORMAL` | 연장 조건 미충족 (무장 상태) |
-| `EXTENDING` | 이번 판단에서 연장 발생 |
-| `EXTENDED` | 이번 하강 구간에서 이미 발급, 제어부 반영 대기 |
-| `CAPPED` | 상한 도달 |
+#### `ZoneExtensionRule.required_sec(occupants, priority_mode=False) -> int`
 
-#### `reset()`
-누적 연장 0, 무장 복구, 상태 `NORMAL`.
-▸ 직접 부르지 말고 `SignalExtensionPipeline.begin_new_cycle()`을 쓸 것.
+확정 보행자들의 구역으로 **필요한 연장 초**를 낸다. 여러 명이면 가장 큰 값
+(가장 오래 걸리는 사람을 도로에 가두지 않기 위해). 아무도 없거나 양 끝 구역만이면 0.
+
+#### `ZoneExtensionRule.max_eta_sec(occupants) -> float | None`
+
+가장 오래 걸리는 사람의 ETA. **양 끝 구역(연장 0)에 있는 사람은 제외한다** — 어차피
+연장을 주지 않기로 한 사람의 ETA를 보내면 아두이노가 줄 수 없는 시간으로 계산하게 된다.
+
+> **상태가 없다.** 누적·무장·임계값 비교는 여기 없다. 전부 제어부(아두이노)가 소유한다.
+> 이전에는 `SignalExtensionStateMachine`이 그 일을 했고 파일이 222줄이었다.
+> 이관 경위는 `docs/decisions.md` 2026-08-26 항목 참고.
 
 ---
 
@@ -547,17 +560,25 @@ ID를 그대로 믿으면 낙상 구간만 쏙 빠져 영영 확정되지 않는
 
 ---
 
-### 3.8 `src/serial_comm.py` — 제어부 통신 (**전부 미구현**)
+### 3.8 `src/serial_comm.py` — 제어부 통신 (**구현 완료**)
 
-| 메서드 | 방향 | 상태 |
-|---|---|---|
-| `read_remaining_time()` | 제어부 → 파이 | ⚠️ `NotImplementedError` (메시지 포맷 미합의) |
-| `read_cycle_started()` | 제어부 → 파이 | ⚠️ `NotImplementedError` (**이벤트 자체가 미합의**) |
-| `send_extend_signal(sec, priority)` | 파이 → 제어부 | ⚠️ `NotImplementedError` |
+| 메서드 | 하는 일 |
+|---|---|
+| `open()` | 포트 열고 `READY`(또는 `PONG`) 대기. 응답 없으면 `RuntimeError` |
+| `update_state(state, 초, ETA, now)` | **변화 시 + 하트비트에만** 실제 전송 → 보낸 줄 or `None` |
+| `send_state(...)` | 무조건 전송 (수동 조작·진단용) |
+| `poll()` | 도착한 줄을 전부 회수해 분류 (논블로킹) |
+| `ping()` | `PING` 전송 후 연결 상태 반환 |
+| `close()` | `NORMAL`을 보내고 닫는다 (부저·연장이 남지 않도록) |
 
-> 잔여 시간과 사이클 경계의 **소유자는 제어부**다. 파이가 잔여 시간의 증감만 보고
-> 사이클 시작을 추측할 수는 없다 — "시간이 갑자기 늘었다"가 새 사이클인지
-> 방금 요청한 연장이 반영된 것인지 구분되지 않기 때문이다.
+포트는 `SERIAL_PORT`가 `None`이면 자동 탐색한다 — 아두이노 USB VID로 거르고, **후보가
+정확히 하나일 때만** 연결한다. 엉뚱한 장치를 잡으면 "열리긴 했는데 무반응"이 되어
+원인을 찾기 어렵기 때문이다.
+
+**수신을 `poll()` 한 곳으로 모은 이유**: 한 채널로 여러 종류의 줄이 섞여 온다.
+"필요할 때 `readline()` 한 번" 방식이면 명령이 늘어날 때 서로의 응답을 잡아먹는다.
+
+프로토콜 표와 아두이노가 구현해야 할 것은 `docs/team_interface.md` "아두이노 계약" 참고.
 
 ---
 
@@ -623,13 +644,11 @@ python tools/manual_camera_person_check.py --source picamera2 --aid-model 후보
 
 | 항목 | 상태 | 막고 있는 것 |
 |---|---|---|
-| 시리얼 통신 3종 | 미구현 | 팀 프로토콜 합의 |
-| 사이클 시작 이벤트 | 미정의 | 제어부와 합의 필요 |
-| 쓰러짐 → 신호 연동 | 미구현 | "EMERGENCY 때 신호를 어떻게 할지" 미결정 |
+| 아두이노 스케치 (신호/연장) | 미구현 | 하드웨어 담당 — 계약은 `team_interface.md`에 확정 |
+| `FALL` 수신 시 신호 동작 | 미결정 | 부저만? 차량 적색 유지? 팀 합의 필요 |
 | 텔레그램 신고 | 미구현 | 봇 토큰 보관 방식 + 범위 미결정 |
-| 교통약자 우선 연장 | 보류 | 가중치가 우리 모형을 잡는지 미검증 |
+| 교통약자 우선 연장 | 값 미정 | `PRIORITY_ZONE_EXTENSION_SEC` (검출 자체는 배선 완료) |
 | `USE_SPEED_FOR_EXTENSION` | 구현됐으나 `False` | 캘리브레이션 + 속도 정확도 실측 |
-| `ZONE_RESIDENCY_FRAMES` | `None` | 파이 실측 FPS |
-| `CROSSWALK_REAL_*_CM` | `None` | 모형 실측 |
+| `ZONE_RESIDENCY_FRAMES` | `None` | 파이 실측 FPS (`--confirm-frames`로 임시 우회) |
 
 자세한 내용과 담당은 `docs/team_interface.md`.

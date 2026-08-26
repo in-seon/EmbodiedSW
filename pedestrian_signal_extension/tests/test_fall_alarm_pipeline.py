@@ -11,6 +11,7 @@ from config import config
 from src.detection import BoundingBox
 from src.fall_detection import FallDetectionPipeline
 from src.pipeline import FallAlarmPipeline
+from src.serial_comm import STATE_FALL, STATE_NORMAL
 
 FRAME = np.zeros((480, 640, 3), dtype=np.uint8)
 # config.FALL_CONFIG["crosswalk_roi"] = (0.15, 0.30, 0.85, 0.95) -> 640x480에서 (96,144)~(544,456)
@@ -36,23 +37,24 @@ class FakeDetector:
 
 
 class SpySerial:
-    """update_alarm 호출을 기록한다."""
+    """상태 전송을 기록한다. 실제 SerialComm처럼 '바뀔 때만' 기록해 전이를 보기 쉽게 한다."""
 
     def __init__(self):
         self.commands = []
-        self.alarm_on = False
+        self.state = None
         self.closed = False
 
-    def update_alarm(self, active, now=None):
-        if active and not self.alarm_on:
-            self.alarm_on = True
-            self.commands.append("ALERT")
-            return "ALERT"
-        if not active and self.alarm_on:
-            self.alarm_on = False
-            self.commands.append("STOP")
-            return "STOP"
-        return None
+    def update_state(self, state, extend_sec=None, eta_sec=None, now=None):
+        if state == self.state:
+            return None
+        self.state = state
+        self.commands.append(state)
+        return state
+
+    def send_state(self, state, extend_sec=None, eta_sec=None, now=None):
+        self.state = state
+        self.commands.append(state)
+        return state
 
     def __enter__(self):
         return self
@@ -91,7 +93,7 @@ def test_standing_person_does_not_trigger_alarm():
 
     assert result.fall_confirmed is False
     assert result.people_count == 1
-    assert spy.commands == []
+    assert spy.commands == [STATE_NORMAL]
 
 
 def test_fall_must_persist_before_alarm():
@@ -100,7 +102,7 @@ def test_fall_must_persist_before_alarm():
 
     assert pipeline.process_frame(FRAME, now=0.0).fall_confirmed is False
     assert pipeline.process_frame(FRAME, now=1.0).fall_confirmed is False
-    assert spy.commands == []
+    assert spy.commands == [STATE_NORMAL]
 
 
 def test_sustained_fall_sends_alert_once():
@@ -110,7 +112,7 @@ def test_sustained_fall_sends_alert_once():
         result = pipeline.process_frame(FRAME, now=t)
 
     assert result.fall_confirmed is True
-    assert spy.commands == ["ALERT"]      # 매 프레임 보내지 않는다
+    assert spy.commands == [STATE_NORMAL, STATE_FALL]      # 매 프레임 보내지 않는다
 
 
 def test_getting_up_sends_stop():
@@ -122,7 +124,7 @@ def test_getting_up_sends_stop():
     for t in times:
         pipeline.process_frame(FRAME, now=t)
 
-    assert spy.commands == ["ALERT", "STOP"]
+    assert spy.commands == [STATE_NORMAL, STATE_FALL, STATE_NORMAL]
 
 
 def test_alarm_survives_brief_detection_gap():
@@ -134,17 +136,17 @@ def test_alarm_survives_brief_detection_gap():
         result = pipeline.process_frame(FRAME, now=t)
 
     assert result.fall_confirmed is True
-    assert spy.commands == ["ALERT"]      # 중간에 STOP이 끼면 안 된다
+    assert spy.commands == [STATE_NORMAL, STATE_FALL]      # 중간에 STOP이 끼면 안 된다
 
 
 def test_reset_alarm_clears_state_and_buzzer():
     pipeline, spy = build([[fallen()]])
     for t in (0.0, 1.0, 2.0, 3.0, 3.5):
         pipeline.process_frame(FRAME, now=t)
-    assert spy.commands == ["ALERT"]
+    assert spy.commands == [STATE_NORMAL, STATE_FALL]
 
     pipeline.reset_alarm()
-    assert spy.commands == ["ALERT", "STOP"]
+    assert spy.commands == [STATE_NORMAL, STATE_FALL, STATE_NORMAL]
     # 누적도 지워졌으므로 다시 3초를 채워야 한다.
     assert pipeline.process_frame(FRAME, now=4.0).fall_confirmed is False
 

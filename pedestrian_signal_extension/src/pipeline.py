@@ -1,29 +1,32 @@
-"""전체 파이프라인: 카메라 -> YOLO 검출 -> 구역 판정/속도 추정 -> 신호 연장 결정 -> 제어부 전송.
+"""전체 파이프라인: 카메라 -> YOLO 검출 -> 판정 -> 아두이노로 상태 전송.
 
-흐름 (CLAUDE.md 4장):
+세 가지 파이프라인이 있다.
+
+    SignalExtensionPipeline  구역 판정 + 속도 -> 연장 요구(EXTEND/NORMAL)
+    FallAlarmPipeline        쓰러짐 판정      -> FALL/NORMAL
+    CombinedPipeline         위 둘을 **추론 1회로** 돌리고 상태를 하나로 합침 (--mode full)
+
+흐름:
 
     프레임
-      -> PersonDetector.detect()              yolov8n-pose, track_id 부여
-      │  -> box.foot_point()                  bbox 하단 모서리 중심 = 지면 접점
-      │  ├-> CrosswalkZones.locate()          몇 번 구역(1~5)인지
-      │  │   -> CrosswalkOccupancy            확정 보행자 / 점유 구역
-      │  └-> SpeedEstimator.update_many()     평면 좌표 변화율로 속도/방향/예상 통과 시간
-      -> MobilityAidDetector.detect()         휠체어/목발 여부 -> priority_mode (저빈도 추론)
-      -> SignalExtensionStateMachine.evaluate()  점유 구역 + priority로 연장 시간 결정
-      -> SerialComm.send_extend_signal()      제어부로 전송
+      -> PersonDetector.detect()            yolov8n-pose, track_id + 키포인트
+      ├-> box.foot_point() -> CrosswalkZones.locate() -> CrosswalkOccupancy
+      │       -> ZoneExtensionRule.required_sec()   구역 -> 필요한 연장 초
+      ├-> SpeedEstimator.update_many()      평면 좌표 변화율 -> 속도/ETA
+      └-> FallDetectionPipeline.update()    키포인트 -> 몸통 각도 -> 쓰러짐 확정
+      -> SerialComm.update_state()          NORMAL / EXTEND <초> <ETA|-> / FALL
 
-검출기가 둘인 이유는 가중치가 다르기 때문이다. 사람 검출용 pose 모델에는 휠체어·목발
-클래스가 아예 없어서 같은 추론으로는 못 잡는다(CLAUDE.md 2.5). 대신 보조 모델은
-'있냐 없냐'만 보면 되므로 매 프레임이 아니라 config.MOBILITY_AID_EVERY_N_FRAMES 마다
-한 번만 돌린다 — src/detection.py의 MobilityAidDetector 참고.
+## '언제 연장할까'는 여기 없다
 
-속도 반영은 config.USE_SPEED_FOR_EXTENSION으로 켜고 끈다(기본 False, CLAUDE.md 2.3).
-켜면 구역별 연장 시간이 '상한'이 되고, 실제 연장은 그 사람이 정말 모자란 만큼으로 줄어든다.
-끄면 지금까지처럼 구역 규칙만 쓴다 — 켜고 끄는 것 외에 다른 동작 차이는 없다.
+잔여 녹색 시간·임계값 판단·누적 상한·사이클 리셋은 **제어부(아두이노)가 소유한다.**
+파이는 "무엇을 보았는가"만 요약해 보낸다. 이유와 아두이노 쪽 계약은
+docs/team_interface.md, 결정 경위는 docs/decisions.md 2026-08-26 항목 참고.
 
-주의: 잔여 녹색 시간(remaining_time_sec)의 소유자는 제어부다. 통신 프로토콜이 확정되면
-SerialComm.read_remaining_time()으로 읽어 넣는다. 프로토콜이 미정인 지금은 SerialComm 생성이
-NotImplementedError로 멈춰, 임의 값으로 동작하는 대신 "무엇을 먼저 확정해야 하는지" 알려준다.
+## 추론은 프레임당 한 번뿐이어야 한다
+
+실측상 추론이 프레임 시간의 99.6%다(82.4ms vs 나머지 0.35ms). 두 판정이 각자
+detect()를 부르면 FPS가 그대로 반토막 나므로, CombinedPipeline이 한 번 검출한 결과를
+process_boxes()로 양쪽에 나눠 준다.
 """
 
 import time
@@ -34,7 +37,8 @@ from src.capture import CameraCapture
 from src.detection import MobilityAidDetector, PersonDetector
 from src.fall_detection import FallDetectionPipeline, roi_from_ratio, roi_from_zones
 from src.serial_comm import SerialComm
-from src.signal_extend import Occupant, SignalExtensionStateMachine
+from src.serial_comm import STATE_EXTEND, STATE_FALL, STATE_NORMAL
+from src.signal_extend import Occupant, ZoneExtensionRule
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
 
@@ -56,6 +60,9 @@ class FrameResult:
     """process_frame 한 번의 결과."""
 
     extension_sec: int = 0
+    # 아두이노로 함께 보낼 예상 통과 시간(초). config.USE_SPEED_FOR_EXTENSION이 꺼져 있거나
+    # 호모그래피가 없거나 아무도 걷고 있지 않으면 None -> 전송 시 '-' 로 나간다.
+    eta_sec: object = None
     occupied_zones: list = field(default_factory=list)
     pedestrians: list = field(default_factory=list)  # PedestrianState 목록
     priority_mode: bool = False
@@ -68,10 +75,20 @@ class FrameResult:
     # 계속 튀면 보조 모델의 오탐이다 — 둘을 구분할 수 있어야 현장에서 원인을 찾는다.
     mobility_aid_count: int = 0
 
+    def serial_state(self):
+        """이 결과를 아두이노로 보낼 (상태, 연장초)로 요약한다.
+
+        연장이 필요 없으면(아무도 없거나 양 끝 구역만) NORMAL이다. 쓰러짐은 이 결과에
+        들어 있지 않으므로 여기서 판단하지 않는다 — CombinedPipeline이 FALL을 덮어쓴다.
+        """
+        if self.extension_sec > 0:
+            return STATE_EXTEND, self.extension_sec
+        return STATE_NORMAL, None
+
 
 class SignalExtensionPipeline:
     def __init__(self, camera=None, detector=None, zones=None, occupancy=None,
-                 state_machine=None, serial_comm=None, speed_estimator=None,
+                 rule=None, serial_comm=None, speed_estimator=None,
                  aid_detector=None):
         # 인자로 주입하지 않으면 config 기반 기본 객체를 만든다(테스트에선 가짜 객체 주입 가능).
         self.camera = camera or CameraCapture()
@@ -82,41 +99,29 @@ class SignalExtensionPipeline:
         self.aid_detector = aid_detector if aid_detector is not None else MobilityAidDetector()
         self.zones = zones or CrosswalkZones.load()
         self.occupancy = occupancy or CrosswalkOccupancy(self.zones)
-        self.state_machine = state_machine or SignalExtensionStateMachine()
+        self.rule = rule or ZoneExtensionRule()
         self.serial_comm = serial_comm or SerialComm()
         # 호모그래피는 zone 설정에서 함께 만들어진다. 실측 치수가 없으면 None -> 속도가 px/s로 나온다.
         self.speed = speed_estimator or SpeedEstimator(ground_plane=self.zones.ground_plane)
 
-    def begin_new_cycle(self):
-        """새 보행 신호 사이클이 시작될 때 호출 — 사이클 단위 상태를 전부 초기화한다.
+    def process_frame(self, frame, timestamp=None) -> FrameResult:
+        """한 프레임을 처리해 이번 프레임의 연장 요구와 보행자 상태를 반환한다."""
+        boxes = self.detector.detect(frame)
+        aid_boxes = self.aid_detector.detect(frame)
+        return self.process_boxes(boxes, aid_boxes, timestamp)
 
-        초기화 대상:
-          - 누적 연장(SignalExtensionStateMachine) — 안 지우면 한 번 상한을 찍은 뒤로
-            영구히 CAPPED가 되어 그 다음 사이클부터 연장이 아예 안 된다.
-          - 잔류 카운트(CrosswalkOccupancy) — 사이클이 바뀌면 보행자도 바뀐다. 이전
-            카운트가 남아 있으면 새 사이클 첫 프레임에서 곧바로 '확정'되어 잔류 검증이 무의미해진다.
-          - 속도 히스토리(SpeedEstimator) — 사이클 경계를 가로지르는 변위는 속도가 아니다.
+    def process_boxes(self, boxes, aid_boxes=(), timestamp=None) -> FrameResult:
+        """이미 검출된 박스로 처리한다 — **추론을 프레임당 한 번만 돌리기 위한 진입점.**
 
-        호출 주체는 제어부다. 잔여 녹색 시간과 마찬가지로 신호 사이클의 소유자가 제어부이므로,
-        "새 녹색 시작" 이벤트가 시리얼 프로토콜에 있어야 한다(docs/team_interface.md 참고).
-        추적 ID(track_id)는 일부러 건드리지 않는다 — 위 세 가지를 지우면 ID가 재사용돼도
-        카운트와 히스토리가 처음부터 다시 쌓이므로 문제가 없고, 추적기 리셋은 비용만 든다.
-        """
-        self.state_machine.reset()
-        self.occupancy.clear()
-        self.speed.clear()
+        --mode full 에서는 쓰러짐 감지와 신호 연장이 같은 프레임을 본다. 각자
+        detector.detect()를 부르면 추론이 2배가 되고, 추론이 프레임 시간의 99.6%라
+        FPS가 그대로 반토막 난다(포즈 모델을 고른 이유가 무너진다). 그래서 호출자가
+        한 번 검출해 결과를 나눠 준다.
 
-    def process_frame(self, frame, remaining_time_sec, timestamp=None) -> FrameResult:
-        """한 프레임을 처리해 이번 사이클 연장 시간과 보행자 상태를 반환한다.
-
-        remaining_time_sec: 제어부가 알려준 현재 잔여 녹색 시간(초).
-        timestamp: 속도 계산용 시각(초). 생략하면 time.monotonic()을 쓴다.
-                   (테스트나 녹화 영상 재생 시 프레임 시각을 직접 넣을 수 있게 인자로 뺐다.)
+        timestamp: 속도 계산용 시각(초). 생략하면 time.monotonic().
         """
         if timestamp is None:
             timestamp = time.monotonic()
-
-        boxes = self.detector.detect(frame)
 
         # 사람만 골라 (track_id, 발 위치) 목록을 만든다.
         detections = [
@@ -125,16 +130,7 @@ class SignalExtensionPipeline:
             if box.is_pedestrian()
         ]
         # 교통약자 보조기구가 하나라도 보이면 우선 연장 모드.
-        #
-        # 판단 근거를 **보조 모델 쪽에서만** 가져오는 것이 중요하다. 예전에는 사람 검출
-        # 결과(boxes)에서 is_mobility_aid()를 봤는데, 사람 검출 가중치(yolov8n-pose)에는
-        # 휠체어 클래스 자체가 없어서 그 조건은 원리상 절대 참이 되지 않았다. 즉
-        # MOBILITY_AID_MODEL_PATH에 가중치를 채워 넣어도 파이프라인은 그걸 쓰지 않았다.
-        #
-        # 지금은 '사람이 어디 있나'(PersonDetector)와 '보조기구가 있나'(MobilityAidDetector)로
-        # 역할이 갈린다. 보조 모델은 매 프레임 돌지 않고(MOBILITY_AID_EVERY_N_FRAMES)
-        # 그 사이엔 직전 결과를 재사용하므로, 추론 비용은 크게 늘지 않는다.
-        aid_boxes = self.aid_detector.detect(frame)
+        # 이 구조에서 '우선'은 **보내는 숫자가 커지는 것**일 뿐이고 프로토콜은 그대로다.
         priority_mode = bool(aid_boxes)
 
         confirmed = self.occupancy.update(detections)
@@ -153,23 +149,23 @@ class SignalExtensionPipeline:
             for track_id, foot_point in detections
         ]
 
-        # 확정 보행자마다 (구역, 예상 통과 시간)을 실어 보낸다. 속도 반영이 꺼져 있거나
-        # ETA가 None이면 상태 머신이 구역 규칙만으로 판단한다(안전한 폴백).
+        # 확정 보행자마다 (구역, 예상 통과 시간)을 실어 규칙에 넘긴다.
         occupants = [
             Occupant(zone=zone, eta_sec=self.speed.estimated_crossing_time_sec(track_id))
             for track_id, zone in confirmed.items()
         ]
 
-        extension_sec = self.state_machine.evaluate(
-            remaining_time_sec=remaining_time_sec,
-            occupants=occupants,
-            priority_mode=priority_mode,
+        extension_sec = self.rule.required_sec(occupants, priority_mode=priority_mode)
+        # ETA는 config.USE_SPEED_FOR_EXTENSION이 켜져 있을 때만 실어 보낸다.
+        # 꺼져 있으면 자리에 '-'가 나가고 아두이노는 구역값을 그대로 쓴다.
+        eta_sec = (
+            self.rule.max_eta_sec(occupants)
+            if config.USE_SPEED_FOR_EXTENSION else None
         )
-        if extension_sec > 0:
-            self.serial_comm.send_extend_signal(extension_sec, priority=priority_mode)
 
         return FrameResult(
             extension_sec=extension_sec,
+            eta_sec=eta_sec,
             occupied_zones=occupied,
             pedestrians=pedestrians,
             priority_mode=priority_mode,
@@ -178,15 +174,16 @@ class SignalExtensionPipeline:
             mobility_aid_count=len(aid_boxes),
         )
 
-    def run(self):
-        """실시간 루프. 제어부 통신 프로토콜 확정 후 사용."""
+    def run(self, on_result=None):
+        """실시간 루프 (신호 연장만). 쓰러짐까지 함께 돌리려면 CombinedPipeline을 쓸 것."""
         with self.camera, self.serial_comm:
             for frame in self.camera.frames():
-                # 사이클 경계와 잔여 시간 모두 제어부가 소유하는 값이다.
-                if self.serial_comm.read_cycle_started():
-                    self.begin_new_cycle()
-                remaining = self.serial_comm.read_remaining_time()
-                self.process_frame(frame, remaining)
+                result = self.process_frame(frame)
+                state, extend = result.serial_state()
+                self.serial_comm.update_state(state, extend, result.eta_sec)
+                if on_result is not None and on_result(result, frame) is False:
+                    break
+
 
 
 @dataclass
@@ -196,8 +193,8 @@ class FallAlarmResult:
     fall_confirmed: bool = False
     confirmed_ids: set = field(default_factory=set)
     people_count: int = 0
-    # 이번 프레임에 실제로 아두이노로 보낸 명령("ALERT"/"STOP") 또는 None.
-    # 매 프레임 보내지 않으므로 대부분의 프레임에서 None이다(SerialComm.update_alarm 참고).
+    # 이번 프레임에 실제로 아두이노로 보낸 줄("FALL"/"NORMAL") 또는 None.
+    # 변화 시와 하트비트에만 보내므로 대부분의 프레임에서 None이다(SerialComm.update_state 참고).
     command_sent: object = None
 
 
@@ -249,10 +246,19 @@ class FallAlarmPipeline:
              monotonic은 시스템 시각이 조정돼도 뒤로 가지 않는다는 장점이 있다.
         """
         now = time.monotonic() if now is None else now
-
         boxes = self.detector.detect(frame)
+        return self.process_boxes(boxes, frame, now)
+
+    def process_boxes(self, boxes, frame, now=None) -> FallAlarmResult:
+        """이미 검출된 박스로 처리한다 (추론 1회 공유 — SignalExtensionPipeline과 같은 이유).
+
+        frame은 ROI를 화면 비율로 잡을 때 크기를 알아야 해서 받는다(첫 프레임에만 쓰인다).
+        """
+        now = time.monotonic() if now is None else now
+
         fall = self._fall_pipeline(frame).update(boxes, now)
-        command = self.serial_comm.update_alarm(fall["fall_confirmed"], now=now)
+        state = STATE_FALL if fall["fall_confirmed"] else STATE_NORMAL
+        command = self.serial_comm.update_state(state, now=now)
 
         return FallAlarmResult(
             fall_confirmed=fall["fall_confirmed"],
@@ -269,7 +275,7 @@ class FallAlarmPipeline:
         """
         if self._fall is not None:
             self._fall.reset()
-        self.serial_comm.update_alarm(False)
+        self.serial_comm.send_state(STATE_NORMAL)
 
     def run(self, on_result=None):
         """실시간 루프. on_result(result, frame)이 주어지면 프레임마다 호출한다.
@@ -282,3 +288,99 @@ class FallAlarmPipeline:
                 result = self.process_frame(frame)
                 if on_result is not None and on_result(result, frame) is False:
                     break
+
+
+@dataclass
+class CombinedResult:
+    """CombinedPipeline.process_frame 한 번의 결과."""
+
+    fall: FallAlarmResult = field(default_factory=FallAlarmResult)
+    extension: FrameResult = field(default_factory=FrameResult)
+    state: str = STATE_NORMAL          # 실제로 아두이노에 반영된 상태
+    extend_sec: object = None
+    line_sent: object = None           # 이번 프레임에 보낸 줄, 안 보냈으면 None
+
+
+class CombinedPipeline:
+    """목표 1 + 2를 한 루프에서 돌린다 (--mode full).
+
+    ## 추론은 프레임당 한 번뿐이다
+
+    이것이 이 클래스의 존재 이유다. 두 파이프라인을 각각 run() 하면 같은 프레임에
+    YOLO가 두 번 돌고, 추론이 프레임 시간의 99.6%라 FPS가 그대로 반토막 난다.
+    여기서 한 번 검출해 두 쪽에 나눠 준다(process_boxes).
+
+    ## 상태 우선순위: FALL > EXTEND > NORMAL
+
+    시리얼 채널이 하나이고 상태도 하나다. 쓰러진 사람이 있으면 연장 요구보다 그쪽이
+    급하므로 FALL이 이긴다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
+
+    쓰러짐 중에 연장을 못 보내는 것이 손해처럼 보이지만, 쓰러진 사람은 애초에
+    연장으로 해결되는 상황이 아니다(스스로 못 건넌다). 제어부가 FALL을 받으면
+    사이렌과 함께 차량 신호를 어떻게 할지 결정한다 — docs/team_interface.md 참고.
+    """
+
+    def __init__(self, camera=None, detector=None, serial_comm=None,
+                 extension=None, fall=None, zones=None):
+        self.camera = camera or CameraCapture()
+        self.detector = detector or PersonDetector()
+        self.serial_comm = serial_comm or SerialComm()
+        zones = zones if zones is not None else CrosswalkZones.load()
+
+        # 두 파이프라인에 **같은 시리얼 객체**를 주되, 상태 전송은 여기서 한 번만 한다.
+        # 각자 보내면 같은 프레임에 NORMAL과 EXTEND가 번갈아 나가 서로를 덮어쓴다.
+        self.extension = extension or SignalExtensionPipeline(
+            camera=self.camera, detector=self.detector,
+            serial_comm=_NoSend(), zones=zones,
+        )
+        self.fall = fall or FallAlarmPipeline(
+            camera=self.camera, detector=self.detector,
+            serial_comm=_NoSend(), zones=zones,
+        )
+
+    def process_frame(self, frame, timestamp=None) -> CombinedResult:
+        now = time.monotonic() if timestamp is None else timestamp
+
+        # ---- 추론 1회 ----
+        boxes = self.detector.detect(frame)
+        aid_boxes = self.extension.aid_detector.detect(frame)
+
+        fall_result = self.fall.process_boxes(boxes, frame, now)
+        ext_result = self.extension.process_boxes(boxes, aid_boxes, now)
+
+        if fall_result.fall_confirmed:
+            state, extend = STATE_FALL, None
+        else:
+            state, extend = ext_result.serial_state()
+
+        line = self.serial_comm.update_state(state, extend, ext_result.eta_sec, now=now)
+        return CombinedResult(
+            fall=fall_result, extension=ext_result,
+            state=state, extend_sec=extend, line_sent=line,
+        )
+
+    def reset_alarm(self):
+        """오탐으로 사이렌에 갇혔을 때의 탈출구."""
+        self.fall.reset_alarm()
+
+    def run(self, on_result=None):
+        with self.camera, self.serial_comm:
+            for frame in self.camera.frames():
+                result = self.process_frame(frame)
+                if on_result is not None and on_result(result, frame) is False:
+                    break
+
+
+class _NoSend:
+    """CombinedPipeline이 하위 파이프라인에 끼워 넣는 '전송하지 않는' 시리얼.
+
+    두 파이프라인은 각자 상태를 보내도록 만들어져 있지만, 합쳐 돌릴 때는 상태가
+    하나여야 한다. 하위 쪽 전송을 막아 두고 CombinedPipeline이 우선순위를 정해
+    한 번만 보낸다.
+    """
+
+    def update_state(self, state, extend_sec=None, eta_sec=None, now=None):
+        return None
+
+    def send_state(self, state, extend_sec=None, eta_sec=None):
+        return None

@@ -5,7 +5,7 @@
 
 사용법:
     python tools/manual_buzzer_check.py                  # 연결된 포트 목록만 출력
-    python tools/manual_buzzer_check.py --port COM3      # PING -> ALERT -> 5초 -> STOP
+    python tools/manual_buzzer_check.py --port COM3      # PING -> FALL -> 5초 -> NORMAL
     python tools/manual_buzzer_check.py --port /dev/ttyACM0 --seconds 3
     python tools/manual_buzzer_check.py --port COM3 --interactive   # 키로 직접 조작
     python tools/manual_buzzer_check.py --port COM3 --watchdog      # 워치독 동작 확인
@@ -14,10 +14,16 @@
 
 ## 확인해야 할 것
 
-  1. PONG이 돌아오는가            -> 포트/보드레이트/케이블 OK
-  2. ALERT에 부저가 울리는가       -> 배선(BUZZER_PIN)과 ACTIVE_BUZZER 설정 OK
-  3. STOP에 멎는가                -> 정지 경로 OK
-  4. (--watchdog) 재전송을 멈추면 30초 뒤 저절로 멎는가 -> 안전장치 OK
+  1. PONG이 돌아오는가        -> 포트/보드레이트/케이블 OK
+  2. FALL에 부저가 울리는가    -> 배선(BUZZER_PIN)과 ACTIVE_BUZZER 설정 OK
+  3. NORMAL에 멎는가           -> 정지 경로 OK
+  4. (--watchdog) 재전송을 멈추면 아두이노가 스스로 NORMAL로 돌아가는가
+
+## ⚠️ 상태 메시지에는 응답이 오지 않는 것이 정상이다
+
+프로토콜상 `NORMAL`/`EXTEND`/`FALL`에는 아두이노가 답하지 않는다. 응답 송신 시간이
+아두이노 루프를 묶기 때문이다(docs/team_interface.md). **연결 확인은 `PING`/`PONG`으로만**
+한다. 상태를 보낸 뒤 아무 줄도 안 오는 것은 고장이 아니다 — 부저가 우는지 귀로 본다.
 """
 
 import argparse
@@ -27,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config
-from src.serial_comm import SerialComm
+from src.serial_comm import STATE_EXTEND, STATE_FALL, STATE_NORMAL, SerialComm
 
 
 def print_ports():
@@ -48,22 +54,22 @@ def drain(comm, label=""):
 
 
 def run_once(comm, seconds):
-    """ALERT -> seconds초 대기 -> STOP."""
+    """FALL -> seconds초 대기 -> NORMAL."""
     print("[1] PING 으로 연결 확인")
     comm.ping()
     time.sleep(0.3)
     drain(comm)
 
-    print(f"[2] ALERT 전송 — {seconds}초간 부저가 삑-삑 울려야 합니다")
-    comm.update_alarm(True)
+    print(f"[2] FALL 전송 — {seconds}초간 부저가 삑-삑 울려야 합니다")
+    comm.send_state(STATE_FALL)
     end = time.monotonic() + seconds
     while time.monotonic() < end:
-        comm.update_alarm(True)      # 하트비트(이 짧은 시간엔 실제로 재전송되진 않는다)
+        comm.send_state(STATE_FALL)      # 하트비트(이 짧은 시간엔 실제로 재전송되진 않는다)
         drain(comm)
         time.sleep(0.1)
 
-    print("[3] STOP 전송 — 부저가 멎어야 합니다")
-    comm.update_alarm(False)
+    print("[3] NORMAL 전송 — 부저가 멎어야 합니다")
+    comm.send_state(STATE_NORMAL)
     time.sleep(0.3)
     drain(comm)
     print("\n부저가 울렸다가 멎었으면 통신·배선 모두 정상입니다.")
@@ -71,8 +77,8 @@ def run_once(comm, seconds):
 
 def run_watchdog(comm):
     """하트비트를 일부러 끊어 아두이노 30초 워치독이 도는지 본다."""
-    print("[1] ALERT 전송 후 **재전송을 멈춥니다.**")
-    comm.update_alarm(True)
+    print("[1] FALL 전송 후 **재전송을 멈춥니다.**")
+    comm.send_state(STATE_FALL)
     print("    아두이노 스케치의 TIMEOUT_MS(30초) 뒤에 'TIMEOUT'이 오고 부저가 멎어야 합니다.")
     print("    (파이가 죽거나 USB가 빠진 상황을 흉내내는 것입니다)\n")
 
@@ -92,15 +98,16 @@ def run_watchdog(comm):
         print(f"\n워치독 정상 — {time.monotonic() - start:.1f}초 만에 스스로 멎었습니다.")
     else:
         print("\n40초를 기다렸는데 TIMEOUT이 오지 않았습니다.")
-        print("스케치의 TIMEOUT_MS 값과, alarmStart가 ALERT마다 갱신되는지 확인하세요.")
-    comm.update_alarm(False)
+        print("스케치의 TIMEOUT_MS 값과, alarmStart가 FALL마다 갱신되는지 확인하세요.")
+    comm.send_state(STATE_NORMAL)
 
 
 def run_interactive(comm):
-    print("명령: a=ALERT  s=STOP  p=PING  q=종료")
+    print("명령: a=FALL  s=NORMAL  e=EXTEND 5  3=EXTEND 3  p=PING  q=종료")
     print()
-    print("  * 명령을 보낸 뒤 '<- OK ALERT' 같은 응답이 오는지 보세요.")
-    print("    응답이 오는데 부저가 안 울린다면 통신은 정상이고 부저/배선 문제입니다.")
+    print("  * 상태 메시지(a/s/e)에는 응답이 없는 것이 정상입니다. 부저는 귀로 확인하세요.")
+    print("  * 연결이 의심되면 p(PING)로 확인하세요 — PONG이 와야 정상입니다.")
+    print("  * PONG은 오는데 부저가 안 울린다면 통신은 정상이고 부저/배선 문제입니다.")
     print("    (arduino/buzzer_only_test/ 스케치로 부저만 따로 확인할 수 있습니다)")
     print()
     while True:
@@ -111,18 +118,24 @@ def run_interactive(comm):
         if key == "q":
             break
         elif key == "a":
-            # update_alarm은 '이미 켜져 있으면' 다시 보내지 않는다(엣지 트리거).
-            # 대화형에서는 누를 때마다 실제로 나가는 편이 확인에 낫다.
-            comm.alert()
-            print("    -> ALERT")
+            # send_state는 변화 감지 없이 무조건 보낸다 — 손으로 확인할 때는
+            # 누를 때마다 실제로 나가야 진단이 된다(update_state는 엣지 트리거).
+            comm.send_state(STATE_FALL)
+            print("    -> FALL")
         elif key == "s":
-            comm.stop()
-            print("    -> STOP")
+            comm.send_state(STATE_NORMAL)
+            print("    -> NORMAL")
+        elif key == "e":
+            comm.send_state(STATE_EXTEND, 5, eta_sec=7.2)
+            print("    -> EXTEND 5 7.2")
+        elif key == "3":
+            comm.send_state(STATE_EXTEND, 3)
+            print("    -> EXTEND 3 -")
         elif key == "p":
             comm.ping()
             print("    -> PING")
         else:
-            print("    a / s / p / q 중에서 입력하세요.")
+            print("    a / s / e / 3 / p / q 중에서 입력하세요.")
             continue
 
         # 응답을 기다렸다가 보여준다. 아두이노 왕복은 보통 수 ms지만 넉넉히 준다.
@@ -135,8 +148,8 @@ def run_interactive(comm):
             time.sleep(0.02)
         for line in got:
             print(f"    <- {line}")
-        if not got:
-            print("    <- (응답 없음)  아두이노가 이 명령을 모르거나 스케치가 다릅니다.")
+        if not got and key == "p":
+            print("    <- (PONG 없음)  스케치가 안 올라갔거나 보드레이트가 다릅니다.")
 
 
 def main():
@@ -147,9 +160,9 @@ def main():
     parser.add_argument("--baudrate", type=int, default=config.SERIAL_BAUDRATE,
                         help="보드레이트. 스케치의 Serial.begin() 값과 같아야 한다.")
     parser.add_argument("--seconds", type=float, default=5.0,
-                        help="ALERT 후 부저를 울려 둘 시간(초).")
+                        help="FALL 후 부저를 울려 둘 시간(초).")
     parser.add_argument("--interactive", action="store_true",
-                        help="키로 ALERT/STOP을 직접 조작한다.")
+                        help="키로 FALL/NORMAL을 직접 조작한다.")
     parser.add_argument("--watchdog", action="store_true",
                         help="하트비트를 끊어 아두이노 30초 자동 정지가 도는지 확인한다.")
     parser.add_argument("--list", action="store_true", help="포트 목록만 출력하고 종료.")
@@ -183,7 +196,7 @@ def main():
     except KeyboardInterrupt:
         print("\n중단됨 (Ctrl+C).")
     finally:
-        # close()가 STOP을 보내므로 어떤 경로로 끝나도 부저는 멎는다.
+        # close()가 NORMAL을 보내므로 어떤 경로로 끝나도 부저는 멎는다.
         comm.close()
 
 

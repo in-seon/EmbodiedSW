@@ -48,7 +48,8 @@ class SpeedEstimator:
     프레임 간 대응을 알 수 없으므로 무시한다(속도를 낼 근거가 없다).
     """
 
-    def __init__(self, ground_plane=None, window_sec=None, min_samples=None, grace_frames=None):
+    def __init__(self, ground_plane=None, window_sec=None, min_samples=None, grace_frames=None,
+                 stopped_threshold=None):
         """ground_plane: GroundPlane 또는 None.
 
         None이면 픽셀 좌표 그대로 계산하고 unit="px/s"로 표시한다.
@@ -63,6 +64,11 @@ class SpeedEstimator:
         # 0은 '유예 없음'이라는 유효한 설정이므로 `or`가 아니라 None 검사를 쓴다.
         self.grace_frames = (
             grace_frames if grace_frames is not None else config.TRACK_GRACE_FRAMES
+        )
+        # 이 속도 미만은 '정지'로 본다. 0이면 예전처럼 0보다 크기만 하면 ETA를 낸다.
+        self.stopped_threshold = (
+            stopped_threshold if stopped_threshold is not None
+            else config.SPEED_STOPPED_THRESHOLD_CM_S
         )
         if self.window_sec is None or self.window_sec <= 0:
             raise ValueError(f"window_sec은 양수여야 합니다: {self.window_sec}")
@@ -195,12 +201,18 @@ class SpeedEstimator:
           - 호모그래피가 없음 (px 단위라 실시간으로 환산 불가)
           - 아직 속도가 계산되지 않음
           - 진행 방향을 판별할 수 없음(정지)
-          - crossing_speed가 0 (걷는 방향으로는 안 움직이는 중)
+          - crossing_speed가 config.SPEED_STOPPED_THRESHOLD_CM_S 미만 (사실상 정지)
+
+        마지막 조건이 중요하다. `> 0` 으로만 거르면 서 있는 사람의 부동소수점 오차가
+        거대한 ETA로 증폭된다(실측 관측: ETA=10351225.3s). 그 값이 아두이노로 나가면
+        엉뚱한 부족분이 계산되므로, 걷는다고 보기 어려운 속도는 아예 ETA를 내지 않는다.
         """
         if self.ground_plane is None:
             return None
         result = self._latest.get(track_id)
-        if result is None or result.direction == 0 or result.crossing_speed <= 0:
+        if result is None or result.direction == 0:
+            return None
+        if result.crossing_speed <= max(self.stopped_threshold, 0.0):
             return None
         remaining = self.ground_plane.remaining_distance_cm(result.position, result.direction)
         if remaining is None:
