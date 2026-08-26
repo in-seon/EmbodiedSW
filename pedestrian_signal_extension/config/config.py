@@ -89,7 +89,7 @@ ZONE_RESIDENCY_FRAMES = None    # TODO(실측 필요): 실측 FPS 기반으로 �
 # **어느 디렉터리에서 실행하느냐에 따라 파일을 못 찾는다.** 리포 루트에서
 # `python pedestrian_signal_extension/main.py` 로 돌리는 것이 자연스러운데, 그때 상대 경로는
 # 엉뚱한 곳을 가리키고 "캘리브레이션을 분명히 했는데 없다고 나온다"가 된다.
-ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "/tools/data" / "zone_config.json")
+ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "/data" / "zone_config.json")
 
 # 검출이 몇 프레임 끊겨도 그 사람의 누적(잔류 카운트 / 속도 히스토리)을 버리지 않고 유지할지.
 #
