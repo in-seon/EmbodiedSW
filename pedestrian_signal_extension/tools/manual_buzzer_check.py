@@ -98,6 +98,11 @@ def run_watchdog(comm):
 
 def run_interactive(comm):
     print("명령: a=ALERT  s=STOP  p=PING  q=종료")
+    print()
+    print("  * 명령을 보낸 뒤 '<- OK ALERT' 같은 응답이 오는지 보세요.")
+    print("    응답이 오는데 부저가 안 울린다면 통신은 정상이고 부저/배선 문제입니다.")
+    print("    (arduino/buzzer_only_test/ 스케치로 부저만 따로 확인할 수 있습니다)")
+    print()
     while True:
         try:
             key = input("> ").strip().lower()
@@ -106,18 +111,32 @@ def run_interactive(comm):
         if key == "q":
             break
         elif key == "a":
-            comm.update_alarm(True)
+            # update_alarm은 '이미 켜져 있으면' 다시 보내지 않는다(엣지 트리거).
+            # 대화형에서는 누를 때마다 실제로 나가는 편이 확인에 낫다.
+            comm.alert()
             print("    -> ALERT")
         elif key == "s":
-            comm.update_alarm(False)
+            comm.stop()
             print("    -> STOP")
         elif key == "p":
             comm.ping()
             print("    -> PING")
         else:
             print("    a / s / p / q 중에서 입력하세요.")
-        time.sleep(0.3)
-        drain(comm)
+            continue
+
+        # 응답을 기다렸다가 보여준다. 아두이노 왕복은 보통 수 ms지만 넉넉히 준다.
+        deadline = time.monotonic() + 0.6
+        got = []
+        while time.monotonic() < deadline:
+            got.extend(comm.poll())
+            if got:
+                break
+            time.sleep(0.02)
+        for line in got:
+            print(f"    <- {line}")
+        if not got:
+            print("    <- (응답 없음)  아두이노가 이 명령을 모르거나 스케치가 다릅니다.")
 
 
 def main():

@@ -271,7 +271,7 @@ DETECTION_TRACKER = "bytetrack.yaml"  # ultralytics 내장 추적기. 필요 시
 # 이 값을 줄여도 zone 좌표와 호모그래피는 그대로 유효하다(재캘리브레이션 불필요).
 # 파이가 느리면 가장 먼저 건드릴 값. 대가는 작은 물체 검출률 하락이므로
 # tools/manual_camera_person_check.py 로 사람 모형이 계속 잡히는지 확인하며 낮출 것.
-DETECTION_IMGSZ = 640
+DETECTION_IMGSZ = 320
 
 # =====================================================================
 # 카메라 (CLAUDE.md 2.1)

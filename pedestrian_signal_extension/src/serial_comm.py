@@ -260,6 +260,22 @@ class SerialComm:
         self.poll()
         return self.ready
 
+    def alert(self):
+        """ALERT를 **무조건** 보낸다 (수동 조작·진단용).
+
+        update_alarm()은 엣지 트리거라 이미 켜져 있으면 아무것도 보내지 않는다. 그 동작은
+        실시간 루프에는 맞지만, 사람이 키를 눌러 확인하는 상황에서는 "눌렀는데 아무 일도
+        안 일어난다"로 보여 진단을 방해한다. 그래서 강제 전송 경로를 따로 둔다.
+        """
+        self._send("ALERT")
+        self._alarm_on = True
+        self._last_alert_sent = time.monotonic()
+
+    def stop(self):
+        """STOP을 **무조건** 보낸다 (수동 조작·진단용)."""
+        self._send("STOP")
+        self._alarm_on = False
+
     def update_alarm(self, active: bool, now=None):
         """쓰러짐 알람 상태를 아두이노에 반영한다. 매 프레임 호출하는 것을 전제로 한다.
 

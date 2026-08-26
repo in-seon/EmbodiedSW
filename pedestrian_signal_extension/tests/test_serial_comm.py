@@ -247,3 +247,37 @@ def test_unagreed_commands_still_raise(call):
     comm.open()
     with pytest.raises(NotImplementedError):
         call(comm)
+
+
+# --- 수동 조작용 강제 전송 (진단 도구가 쓴다) ---
+
+def test_alert_always_sends_even_when_already_on():
+    """update_alarm과 달리 누를 때마다 실제로 나가야 한다 — 안 그러면 진단이 안 된다."""
+    comm, fake = make_comm("READY")
+    comm.open()
+
+    comm.alert()
+    comm.alert()
+    comm.alert()
+    assert fake.sent == ["ALERT", "ALERT", "ALERT"]
+    assert comm.alarm_on is True
+
+
+def test_stop_always_sends():
+    comm, fake = make_comm("READY")
+    comm.open()
+
+    comm.stop()
+    comm.stop()
+    assert fake.sent == ["STOP", "STOP"]
+    assert comm.alarm_on is False
+
+
+def test_manual_alert_keeps_state_for_update_alarm():
+    """alert() 후에는 update_alarm(False)가 STOP을 보낼 수 있어야 한다(상태 동기)."""
+    comm, fake = make_comm("READY")
+    comm.open()
+
+    comm.alert()
+    assert comm.update_alarm(False, now=1.0) == "STOP"
+    assert fake.sent == ["ALERT", "STOP"]

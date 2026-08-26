@@ -93,6 +93,48 @@ def _load_zones(use_zones):
     return zones
 
 
+def _fall_debug_line(box):
+    """쓰러짐 판정에 실제로 들어가는 값들을 한 줄로 만든다.
+
+    **production 함수(torso_angle_deg / looks_fallen)를 그대로 호출한다.** 계산을 여기에
+    복사해 넣으면 화면에 보이는 값과 실제 판정이 갈라져서, 튜닝한 값이 안 먹는 이유를
+    영영 못 찾게 된다. 보이는 것과 판정하는 것이 같아야 튜닝이 성립한다.
+
+    필드:
+      angle : 몸통 각도(도). config.FALL_CONFIG["fall_angle_deg"]와 비교되는 그 값.
+              키포인트 신뢰도가 낮으면 '-' 이고, 그때는 아래 wh(비율)로 폴백 판정한다.
+      kp    : 어깨 / 엉덩이 키포인트의 **최소** 신뢰도. 둘 중 하나라도 0.3 미만이면
+              angle이 '-'가 된다. angle이 자주 '-'로 나오면 fall_angle_deg를 아무리
+              조정해도 소용없다는 뜻이다 — 그때 볼 값은 fall_aspect_ratio다.
+      wh    : bbox 가로/세로. 폴백 경로의 판정 기준(fall_aspect_ratio).
+
+    문자열은 **ASCII만** 쓴다. cv2.putText는 Hershey 폰트라 한글을 못 그려서 창에 '????'로
+    나온다. 같은 문자열을 창과 stdout 양쪽에 쓰므로 낮은 쪽에 맞춘다.
+    """
+    from src.fall_detection import looks_fallen, person_from_box, torso_angle_deg
+
+    person = person_from_box(box)
+    angle = torso_angle_deg(person.keypoints)
+
+    kp = person.keypoints
+    if kp is not None and len(kp) >= 13:
+        shoulder = float(kp[[5, 6]][:, 2].min())
+        hip = float(kp[[11, 12]][:, 2].min())
+        kp_text = f"{shoulder:.2f}/{hip:.2f}"
+    else:
+        kp_text = "none"
+
+    width, height = box.x2 - box.x1, box.y2 - box.y1
+    ratio = (width / height) if height > 0 else 0.0
+
+    fallen = looks_fallen(person, config.FALL_CONFIG)
+    path = "angle" if angle is not None else "ratio"
+    verdict = f"FALLEN({path})" if fallen else "ok"
+
+    angle_text = f"{angle:5.1f}d" if angle is not None else "  -  "
+    return f"ang={angle_text} kp={kp_text} wh={ratio:.2f} {verdict}"
+
+
 def _draw_zones(frame, zones):
     for idx, zone in enumerate(zones.zones, start=1):
         pts = np.array(zone.points, dtype=np.int32)
@@ -107,6 +149,10 @@ def main():
     parser.add_argument("--source", default=config.CAMERA_SOURCE,
                         help="'picamera2'(파이 CSI) / 카메라 인덱스 / 영상 경로 / 스트림 URL")
     parser.add_argument("--no-zones", action="store_true", help="zone 판정 없이 검출만 표시")
+    parser.add_argument("--fall", action="store_true",
+                        help="쓰러짐 판정에 들어가는 값(몸통 각도, 키포인트 신뢰도, bbox 비율)을 "
+                             "함께 표시한다. config.FALL_CONFIG의 fall_angle_deg / "
+                             "fall_aspect_ratio를 튜닝할 때 쓸 것.")
     parser.add_argument("--no-display", action="store_true",
                         help="창을 띄우지 않고 측정값만 1초마다 stdout으로 출력한다(헤드리스). "
                              "모니터 없이 SSH로 접속한 파이에서 실측 FPS를 잴 때 쓴다. "
@@ -221,6 +267,8 @@ def main():
                         lines.append(f"ETA={eta:.1f}s")
                 else:
                     lines.append("speed=...")
+                if args.fall:
+                    lines.append(_fall_debug_line(box))
                 person_lines.append(" ".join(lines))
 
                 if show:
