@@ -223,7 +223,7 @@ PEDESTRIAN_LABEL = "person"     # COCO 클래스명. 파인튜닝 모델로 교�
 #   축소 모형(장난감 휠체어)은 아예 못 잡을 수 있다. 투자하기 전에
 #   `python tools/manual_camera_person_check.py --source 모형사진.jpg --aid-model 후보.pt`
 #   로 우리 모형에서 실제로 잡히는지부터 볼 것.
-MOBILITY_AID_MODEL_PATH = _weight_path("yolo_detect_vulnerable.pt")   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
+MOBILITY_AID_MODEL_PATH = None   # TODO: 후보 가중치 경로. None이면 보조 검출이 비활성(priority_mode 항상 False).
 
 # 위 모델이 아는 클래스명 중 '교통약자'로 볼 것들. 모델마다 이름이 다르므로
 # `YOLO(경로).names` 로 확인한 뒤 채운다. 비어 있으면 모델이 아는 클래스를 전부 쓴다.
