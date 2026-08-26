@@ -89,7 +89,12 @@ ZONE_RESIDENCY_FRAMES = None    # TODO(실측 필요): 실측 FPS 기반으로 �
 # **어느 디렉터리에서 실행하느냐에 따라 파일을 못 찾는다.** 리포 루트에서
 # `python pedestrian_signal_extension/main.py` 로 돌리는 것이 자연스러운데, 그때 상대 경로는
 # 엉뚱한 곳을 가리키고 "캘리브레이션을 분명히 했는데 없다고 나온다"가 된다.
-ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "/data" / "zone_config.json")
+# 주의: 조각에 앞 슬래시를 붙이지 말 것("/data" X, "data" O).
+# pathlib은 루트로 시작하는 조각을 만나면 **앞의 경로를 전부 버린다.**
+#   Path("C:/proj") / "/data" / "x.json"  ->  C:\data\x.json   (프로젝트 경로가 사라짐)
+#   Path("/home/pi/proj") / "/data" / "x.json"  ->  /data/x.json  (파일시스템 최상위!)
+# 파이에서는 후자가 되어 권한 오류로 저장 자체가 실패한다.
+ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "data" / "zone_config.json")
 
 # 검출이 몇 프레임 끊겨도 그 사람의 누적(잔류 카운트 / 속도 히스토리)을 버리지 않고 유지할지.
 #
