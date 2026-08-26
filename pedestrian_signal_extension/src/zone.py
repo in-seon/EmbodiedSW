@@ -100,32 +100,7 @@ class CrosswalkZones:
 
     @classmethod
     def from_quad(cls, corners, n=None, name="crosswalk", width_cm=None, length_cm=None):
-        """횡단보도 사각형의 네 꼭짓점을 받아 걷는 방향으로 N개 구역(스트립)으로 자른다.
 
-        corners 순서: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽].
-        걷는 방향은 '시작 변(0-1)' -> '끝 변(3-2)'. 이 방향을 따라 N등분한다.
-        (tools/zone_calibrator.py 가 이 순서대로 클릭받아 저장한다.)
-
-        ## 어디서 5등분하는가 — 화면이 아니라 '실제 거리' 기준이다
-
-        사선 카메라에서는 **화면상 균등 분할이 실제로는 전혀 균등하지 않다.** 원근 때문에
-        먼 쪽 1픽셀이 가까운 쪽 1픽셀보다 훨씬 긴 실거리를 나타내기 때문이다.
-        폭 400cm x 길이 1000cm 횡단보도를 사선으로 본 실측 예에서, 화면상 5등분은 실제로
-        이런 구역을 만든다:
-
-            1번  77cm  |  2번 105cm  |  3번 152cm  |  4번 238cm  |  5번 429cm
-
-        1번과 5번이 5.6배 차이나고, 더 중요하게는 **횡단보도의 진짜 한가운데(500cm)가
-        3번이 아니라 4번 구역에 들어간다.** "정중앙에 있으면 가장 길게 연장한다"는
-        설계 전제(CLAUDE.md 2.4)가 그대로 깨진다.
-
-        그래서 호모그래피가 있으면 **평면 좌표(cm)에서 균등 분할한 뒤 픽셀로 되돌린다**
-        (`_split_on_ground`). 그러면 각 구역이 실제로 200cm씩 담당한다.
-
-        width_cm/length_cm가 없으면 호모그래피를 만들 수 없으므로 화면상 분할로 대체하고
-        (`_split_on_pixels`), 위와 같은 왜곡을 감수한다. 실측 치수를 넣는 것이 정확도에
-        직결되는 이유가 이것이다.
-        """
         n = n or config.CROSSWALK_ZONE_COUNT
         if len(corners) != 4:
             raise ValueError("corners는 [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽] 4개 점이어야 합니다.")
@@ -164,23 +139,7 @@ class CrosswalkZones:
 
     @classmethod
     def load(cls, path=None, expected_frame_size=None):
-        """zone 설정 JSON을 읽는다.
-
-        지원 형식:
-          {"name": ..., "corners": [[x,y]*4], "n_zones": 5,
-           "real_width_cm": 90, "real_length_cm": 300}       # 4코너 자동 분할(권장)
-          {"name": ..., "zones": [[[x,y]*>=3], ...]}          # 구역 폴리곤을 직접 나열
-
-        실측 치수(real_width_cm / real_length_cm)는 선택 사항이다. 파일에 없으면 config의
-        CROSSWALK_REAL_WIDTH_CM / CROSSWALK_REAL_LENGTH_CM 로 대체하고, 그것도 없으면
-        ground_plane은 None이 된다(속도가 px/s로 떨어질 뿐 구역 판정은 정상).
-
-        'zones' 형식(폴리곤 직접 나열)에는 네 꼭짓점이 없으므로 호모그래피를 만들 수 없다.
-        속도를 cm/s로 내려면 'corners' 형식을 써야 한다.
-
-        설정에 'frame_size'가 있으면 expected_frame_size(기본: config.CAMERA_RESOLUTION)와
-        비교해 다르면 ValueError를 낸다 — 해상도가 다르면 좌표가 통째로 어긋나기 때문이다.
-        """
+      
         path = path or config.ZONE_CONFIG_PATH
         if expected_frame_size is None:
             expected_frame_size = config.CAMERA_RESOLUTION

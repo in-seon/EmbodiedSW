@@ -77,10 +77,15 @@ MAX_TOTAL_EXTENSION_SEC = 10
 # "처음부터 시간을 넉넉하게 준다"는 부분은 제어부가 기본 녹색시간을 늘리는 방식으로 구현하고
 # (파이 -> 제어부로 priority 플래그 전달), 파이 쪽 연장 규칙은 아래 값으로 차등한다.
 # 미정이면 None으로 두고, 이 경우 state machine은 일반 규칙(ZONE_EXTENSION_SEC)으로 대체 동작한다.
-PRIORITY_ZONE_EXTENSION_SEC = None       # TODO(팀 확정 필요): 우선 연장 구역별 차등 맵 {1:.., 2:.., ...}.
-PRIORITY_MAX_TOTAL_EXTENSION_SEC = None   # TODO(팀 확정 필요): 우선 연장 시 별도(더 높은) 상한.
+PRIORITY_ZONE_EXTENSION_SEC =  {
+    1: 0,     # 양 끝 구역 — 연장 안 함 (거의 다 건넜거나 이제 막 진입)
+    2: 3.75,     # 끝-중앙 사이. 근거: 서울시 3~6초 연장 사례의 하한.
+    3: 6.25,     # 정중앙. 근거: 광주시 "최대 5초", 음성군 "5초 간격" 자동 연장.
+    4: 3.75,     # 중앙-끝 사이. 2번과 대칭.
+    5: 0,     # 양 끝 구역 — 연장 안 함
+}       # TODO(팀 확정 필요): 우선 연장 구역별 차등 맵 {1:.., 2:.., ...}.
+PRIORITY_MAX_TOTAL_EXTENSION_SEC = 12.5  # TODO(팀 확정 필요): 우선 연장 시 별도(더 높은) 상한.
 
-# --- Zone 잔류/확정 판단 (CLAUDE.md 2.2) ---
 # 검출 흔들림에 대비해, 횡단보도(아무 구역) 안에서 이만큼 연속 검출돼야 "확정 보행자"로 본다.
 ZONE_RESIDENCY_FRAMES = None    # TODO(실측 필요): 실측 FPS 기반으로 튜닝.
 # tools/zone_calibrator.py 로 생성되는 zone 좌표 파일 경로.
@@ -134,8 +139,8 @@ TRACK_GRACE_FRAMES = 2
 # 두 값이 모두 채워져 있어야 GroundPlane이 만들어진다. 하나라도 None이면
 # CrosswalkZones.ground_plane 이 None이 되고, 구역 판정은 그대로 동작하되
 # 속도는 px/s로만 나온다(원근 보정 없이 cm인 척하지 않기 위함).
-CROSSWALK_REAL_WIDTH_CM = 10.0   # 모형 실측: 100mm. 걷는 방향과 수직인 변의 길이.
-CROSSWALK_REAL_LENGTH_CM = 30.0  # 모형 실측: 300mm. 걷는 방향(시작 변 -> 끝 변)의 길이.
+CROSSWALK_REAL_WIDTH_CM = 30.0   # 모형 실측: 100mm. 걷는 방향과 수직인 변의 길이.
+CROSSWALK_REAL_LENGTH_CM = 40.0  # 모형 실측: 300mm. 걷는 방향(시작 변 -> 끝 변)의 길이.
 
 # --- 축척과 '모형 보행자 속도' — 연장 시간이 그대로 유효한 이유 ---
 #
