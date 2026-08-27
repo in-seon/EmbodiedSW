@@ -321,7 +321,7 @@ class CombinedPipeline:
     YOLO가 두 번 돌고, 추론이 프레임 시간의 99.6%라 FPS가 그대로 반토막 난다.
     여기서 한 번 검출해 두 쪽에 나눠 준다(process_boxes).
 
-    ## 상태 우선순위: FALL > EXTEND > NORMAL
+    ## 상태 우선순위: FALL > ZONE > NORMAL
 
     시리얼 채널이 하나이고 상태도 하나다. 쓰러진 사람이 있으면 연장 요구보다 그쪽이
     급하므로 FALL이 이긴다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
@@ -329,6 +329,16 @@ class CombinedPipeline:
     쓰러짐 중에 연장을 못 보내는 것이 손해처럼 보이지만, 쓰러진 사람은 애초에
     연장으로 해결되는 상황이 아니다(스스로 못 건넌다). 제어부가 FALL을 받으면
     사이렌과 함께 차량 신호를 어떻게 할지 결정한다 — docs/team_interface.md 참고.
+
+    ## ⚠️ 쓰러짐 해제는 NORMAL이 아니라 '상태가 FALL에서 벗어남'으로 표현된다
+
+    일어난 사람이 횡단보도에 그대로 있으면 여전히 확정 보행자이므로 곧바로 ZONE이 나간다:
+
+        ZONE 1 -> ZONE 3 -> FALL -> ZONE 4        <- NORMAL이 끼지 않는다
+
+    그래서 아두이노는 **`부저 = (마지막 상태 == FALL)`** 로 짜야 한다. "NORMAL을 받아야
+    끈다"로 짜면 이 구간에서 부저가 영영 울린다. NORMAL은 "쓰러짐 해제"가 아니라
+    **"확정 보행자 없음"**이다.
     """
 
     def __init__(self, camera=None, detector=None, serial_comm=None,

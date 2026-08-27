@@ -320,3 +320,38 @@ def test_combined_runs_inference_once_per_frame():
     combined.process_frame(None, timestamp=0.0)
     combined.process_frame(None, timestamp=1.0)
     assert combined.detector.calls == 2
+
+
+def test_zone_resumes_immediately_after_fall_without_normal():
+    """쓰러졌다 일어나 횡단보도에 남으면 FALL -> ZONE 으로 바로 넘어간다 (NORMAL이 끼지 않는다).
+
+    아두이노가 "NORMAL을 받아야 부저를 끈다"로 짜면 이 구간에서 부저가 영영 울린다.
+    계약은 `부저 = (마지막 상태 == FALL)` 이다 — docs/team_interface.md 참고.
+    """
+    boxes = [box_at(50, 100, 1)]
+    serial = FakeSerial()
+    extension = build_pipeline([boxes] * 3)
+    fall = StubFall(True)
+    combined = CombinedPipeline(
+        camera=object(), detector=FakeDetector([boxes] * 3), serial_comm=serial,
+        extension=extension, fall=fall, zones=extension.zones,
+    )
+
+    assert combined.process_frame(None, timestamp=0.0).state == STATE_FALL
+    fall.confirmed = False                       # 일어났다 (횡단보도에는 그대로 있다)
+    resumed = combined.process_frame(None, timestamp=1.0)
+
+    assert resumed.state == STATE_ZONE
+    assert [s for s, _ in serial.states] == [STATE_FALL, STATE_ZONE]
+    assert STATE_NORMAL not in [s for s, _ in serial.states]
+
+
+def test_normal_means_nobody_not_fall_cleared():
+    """NORMAL은 '쓰러짐 해제'가 아니라 '확정 보행자 없음'이다."""
+    serial = FakeSerial()
+    extension = build_pipeline([[]])
+    combined = CombinedPipeline(
+        camera=object(), detector=FakeDetector([[]]), serial_comm=serial,
+        extension=extension, fall=StubFall(False), zones=extension.zones,
+    )
+    assert combined.process_frame(None, timestamp=0.0).state == STATE_NORMAL
