@@ -2,8 +2,8 @@
 
 세 가지 파이프라인이 있다.
 
-    SignalExtensionPipeline  구역 판정 + 속도 -> 연장 요구(EXTEND/NORMAL)
-    FallAlarmPipeline        쓰러짐 판정      -> FALL/NORMAL
+    SignalExtensionPipeline  구역 판정 + 속도 -> 연장 요구(zone/normal)
+    FallAlarmPipeline        쓰러짐 판정      -> fall/normal
     CombinedPipeline         위 둘을 **추론 1회로** 돌리고 상태를 하나로 합침 (--mode full)
 
 흐름:
@@ -14,7 +14,7 @@
       │       -> CrossingProgress -> minimum_progress()  가장 덜 건넌 사람
       ├-> SpeedEstimator.update_many()      평면 좌표 변화율 -> 속도/ETA
       └-> FallDetectionPipeline.update()    키포인트 -> 몸통 각도 -> 쓰러짐 확정
-      -> SerialComm.update_state()          NORMAL / ZONE <진척도> / FALL
+      -> SerialComm.update_state()          normal / zone<진척도> / fall
 
 ## '언제 연장할까'는 여기 없다
 
@@ -36,7 +36,9 @@ from config import config
 from src.capture import CameraCapture
 from src.detection import MobilityAidDetector, PersonDetector
 from src.fall_detection import FallDetectionPipeline, roi_from_ratio, roi_from_zones
+from src.motor import MotorGate
 from src.serial_comm import SerialComm
+from src.serial_comm import CMD_START, CMD_STOP
 from src.serial_comm import STATE_FALL, STATE_NORMAL, STATE_ZONE
 from src.signal_extend import Occupant, maximum_eta_sec, minimum_progress
 from src.speed import SpeedEstimator
@@ -204,7 +206,7 @@ class FallAlarmResult:
     fall_confirmed: bool = False
     confirmed_ids: set = field(default_factory=set)
     people_count: int = 0
-    # 이번 프레임에 실제로 아두이노로 보낸 줄("FALL"/"NORMAL") 또는 None.
+    # 이번 프레임에 실제로 아두이노로 보낸 줄("fall"/"normal") 또는 None.
     # 변화 시와 하트비트에만 보내므로 대부분의 프레임에서 None이다(SerialComm.update_state 참고).
     command_sent: object = None
 
@@ -310,6 +312,11 @@ class CombinedResult:
     state: str = STATE_NORMAL          # 실제로 아두이노에 반영된 상태
     zone: object = None                # ZONE 상태일 때의 진척도
     line_sent: object = None           # 이번 프레임에 보낸 줄, 안 보냈으면 None
+    motor_running: bool = False        # 모형 보행자 모터가 지금 **움직이고** 있는가
+    motor_paused: bool = False         # 기동돼 있으나 쓰러짐 연출로 잠깐 세워 둔 상태
+    # 이번 프레임에 모터가 기동/정지했으면 그 사유 한 줄, 아니면 None.
+    # 매 프레임 상태를 찍으면 로그가 묻히므로 '바뀐 순간'만 남긴다.
+    motor_event: object = None
 
 
 class CombinedPipeline:
@@ -321,32 +328,50 @@ class CombinedPipeline:
     YOLO가 두 번 돌고, 추론이 프레임 시간의 99.6%라 FPS가 그대로 반토막 난다.
     여기서 한 번 검출해 두 쪽에 나눠 준다(process_boxes).
 
-    ## 상태 우선순위: FALL > ZONE > NORMAL
+    ## 상태 우선순위: fall > zone > normal
 
     시리얼 채널이 하나이고 상태도 하나다. 쓰러진 사람이 있으면 연장 요구보다 그쪽이
-    급하므로 FALL이 이긴다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
+    급하므로 fall이 이긴다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
 
     쓰러짐 중에 연장을 못 보내는 것이 손해처럼 보이지만, 쓰러진 사람은 애초에
-    연장으로 해결되는 상황이 아니다(스스로 못 건넌다). 제어부가 FALL을 받으면
+    연장으로 해결되는 상황이 아니다(스스로 못 건넌다). 제어부가 fall을 받으면
     사이렌과 함께 차량 신호를 어떻게 할지 결정한다 — docs/team_interface.md 참고.
 
-    ## ⚠️ 쓰러짐 해제는 NORMAL이 아니라 '상태가 FALL에서 벗어남'으로 표현된다
+    ## ⚠️ 쓰러짐 해제는 normal이 아니라 '상태가 FALL에서 벗어남'으로 표현된다
 
     일어난 사람이 횡단보도에 그대로 있으면 여전히 확정 보행자이므로 곧바로 ZONE이 나간다:
 
-        ZONE 1 -> ZONE 3 -> FALL -> ZONE 4        <- NORMAL이 끼지 않는다
+        zone1 -> zone3 -> fall -> zone4        <- normal이 끼지 않는다
 
-    그래서 아두이노는 **`부저 = (마지막 상태 == FALL)`** 로 짜야 한다. "NORMAL을 받아야
-    끈다"로 짜면 이 구간에서 부저가 영영 울린다. NORMAL은 "쓰러짐 해제"가 아니라
+    그래서 아두이노는 **`부저 = (마지막 상태 == fall)`** 로 짜야 한다. "normal을 받아야
+    끈다"로 짜면 이 구간에서 부저가 영영 울린다. normal은 "쓰러짐 해제"가 아니라
     **"확정 보행자 없음"**이다.
+
+    ## 모형 보행자 모터 (선택)
+
+    모터는 파이 GPIO에 붙어 있고, 기동 시점만 아두이노가 안다:
+
+        아두이노 START -> 기동      파이가 '건너갔다'를 판단 -> 정지
+
+    정지를 파이가 내는 이유와 '없음'이 아니라 '있었다가 없어짐'이어야 하는 이유는
+    src/motor.py의 MotorGate 참고. motor=None이면 명령만 읽고 구동하지 않는다.
+
+    쓰러짐 연출(서보) 중에는 pause_motor()/resume_motor()로 잠깐 세운다 — 넘어진 모형이
+    계속 끌려가면 안 되지만, 일어난 뒤에는 마저 건너야 하므로 정지가 아니라 일시정지다.
     """
 
     def __init__(self, camera=None, detector=None, serial_comm=None,
-                 extension=None, fall=None, zones=None):
+                 extension=None, fall=None, zones=None,
+                 motor=None, motor_gate=None):
         self.camera = camera or CameraCapture()
         self.detector = detector or PersonDetector()
         self.serial_comm = serial_comm or SerialComm()
         zones = zones if zones is not None else CrosswalkZones.load()
+
+        # 모터는 **선택**이다. None이면 START/STOP을 읽되 아무것도 구동하지 않는다.
+        # 모형 없이 판정만 확인하는 것이 흔한 사용법이라 기본을 '없음'으로 뒀다.
+        self.motor = motor
+        self.motor_gate = motor_gate if motor_gate is not None else MotorGate()
 
         # 두 파이프라인에 **같은 시리얼 객체**를 주되, 상태 전송은 여기서 한 번만 한다.
         # 각자 보내면 같은 프레임에 NORMAL과 EXTEND가 번갈아 나가 서로를 덮어쓴다.
@@ -375,21 +400,90 @@ class CombinedPipeline:
             state, zone = ext_result.serial_state()
 
         line = self.serial_comm.update_state(state, zone, now=now)
+
+        # 모터는 상태 전송 **뒤에** 다룬다. 아두이노로 보내는 것이 이 루프의 본업이고,
+        # 모터는 시연용 부수 장치다. 앞에 두면 GPIO 지연이 상태 전송을 밀어낸다.
+        motor_event = self._drive_motor(ext_result, now)
+
         return CombinedResult(
             fall=fall_result, extension=ext_result,
             state=state, zone=zone, line_sent=line,
+            motor_running=self.motor_gate.moving,
+            motor_paused=self.motor_gate.paused,
+            motor_event=motor_event,
         )
+
+    def _drive_motor(self, ext_result, now):
+        """아두이노 명령을 반영하고, 정지 조건을 판단해 모터를 구동한다.
+
+        ## 기동은 아두이노가, 정지는 파이가
+
+        "보행 녹색이 시작됐다"는 신호를 소유한 아두이노만 알고, "모형이 횡단보도를
+        빠져나갔다"는 영상을 보는 파이만 안다. 그래서 START는 받고 정지는 스스로 낸다.
+
+        ## '확정 보행자'로 판단하는 이유
+
+        occupied 기준을 progress로 잡았다 — 즉 **잔류 확정된 사람이 구역 안에 있는가**다.
+        원시 검출로 판단하면 스쳐 지나가는 오검출 한 프레임에 모터가 멈춘다.
+        아두이노로 보내는 ZONE의 기준과 같은 값이라 로그를 나란히 읽을 수 있다는
+        장점도 있다(ZONE이 사라진 프레임 = 모터가 멈추는 프레임).
+        """
+        event = None
+        for name, mode in self.serial_comm.take_commands():
+            if name == CMD_START:
+                if self.motor_gate.start(mode, now=now):
+                    if self.motor is not None:
+                        self.motor.start(self.motor_gate.mode)
+                    event = f"모터 기동 (모드 {self.motor_gate.mode})"
+            elif name == CMD_STOP and self.motor_gate.stop():
+                if self.motor is not None:
+                    self.motor.stop()
+                event = f"모터 정지 ({self.motor_gate.last_stop_reason})"
+
+        if self.motor_gate.update(ext_result.progress is not None, now=now):
+            if self.motor is not None:
+                self.motor.stop()
+            event = f"모터 정지 ({self.motor_gate.last_stop_reason})"
+        return event
+
+    def pause_motor(self, now=None) -> bool:
+        """모형 구동을 잠깐 세운다 (쓰러짐 연출용). 정지가 아니라 **일시정지**다.
+
+        모형에는 모터가 둘이다 — 끌고 가는 스텝모터와 발을 넘어뜨리는 서보.
+        넘어진 모형이 계속 끌려가면 안 되므로, 서보가 눕히는 순간 이쪽을 세운다.
+        stop()이 아닌 이유는 MotorGate.pause() 참고(같은 횡단을 이어서 가야 한다).
+        """
+        if not self.motor_gate.pause(now=now):
+            return False
+        if self.motor is not None:
+            self.motor.stop()
+        return True
+
+    def resume_motor(self, now=None) -> bool:
+        """세워 뒀던 모형을 멈춘 지점부터 이어서 움직인다."""
+        if not self.motor_gate.resume(now=now):
+            return False
+        if self.motor is not None:
+            self.motor.start(self.motor_gate.mode)
+        return True
 
     def reset_alarm(self):
         """오탐으로 사이렌에 갇혔을 때의 탈출구."""
         self.fall.reset_alarm()
 
     def run(self, on_result=None):
-        with self.camera, self.serial_comm:
-            for frame in self.camera.frames():
-                result = self.process_frame(frame)
-                if on_result is not None and on_result(result, frame) is False:
-                    break
+        try:
+            with self.camera, self.serial_comm:
+                for frame in self.camera.frames():
+                    result = self.process_frame(frame)
+                    if on_result is not None and on_result(result, frame) is False:
+                        break
+        finally:
+            # 어떤 경로로 끝나도 모터는 반드시 멈춘다. 예외로 빠져나갈 때 스텝 스레드가
+            # 그대로 살아 있으면, 파이썬이 죽은 뒤에도 코일에 전류가 남아 모터가 탄다.
+            if self.motor is not None:
+                self.motor.close()
+            self.motor_gate.stop()
 
 
 class _NoSend:
@@ -405,3 +499,6 @@ class _NoSend:
 
     def send_state(self, state, extend_sec=None, now=None):
         return None
+
+    def take_commands(self):
+        return []

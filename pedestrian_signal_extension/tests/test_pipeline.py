@@ -52,10 +52,15 @@ class FakeDetector:
 
 
 class FakeSerial:
-    """보낸 줄을 기록한다. 실제 SerialComm의 변화 감지/하트비트까지 흉내내지는 않는다."""
+    """보낸 줄을 기록한다. 실제 SerialComm의 변화 감지/하트비트까지 흉내내지는 않는다.
 
-    def __init__(self):
+    inbox에 넣어 둔 (명령, 인자)는 아두이노가 보낸 것으로 친다 — take_commands가
+    실제 SerialComm처럼 **꺼내면서 비운다.**
+    """
+
+    def __init__(self, inbox=None):
         self.states = []
+        self.inbox = list(inbox or [])
 
     def update_state(self, state, zone=None, now=None):
         self.states.append((state, zone))
@@ -64,6 +69,10 @@ class FakeSerial:
     def send_state(self, state, zone=None, now=None):
         self.states.append((state, zone))
         return state
+
+    def take_commands(self):
+        commands, self.inbox = self.inbox, []
+        return commands
 
 
 class FakeAidDetector:
@@ -325,7 +334,7 @@ def test_combined_runs_inference_once_per_frame():
 def test_zone_resumes_immediately_after_fall_without_normal():
     """쓰러졌다 일어나 횡단보도에 남으면 FALL -> ZONE 으로 바로 넘어간다 (NORMAL이 끼지 않는다).
 
-    아두이노가 "NORMAL을 받아야 부저를 끈다"로 짜면 이 구간에서 부저가 영영 울린다.
+    아두이노가 "normal을 받아야 부저를 끈다"로 짜면 이 구간에서 부저가 영영 울린다.
     계약은 `부저 = (마지막 상태 == FALL)` 이다 — docs/team_interface.md 참고.
     """
     boxes = [box_at(50, 100, 1)]
@@ -347,7 +356,7 @@ def test_zone_resumes_immediately_after_fall_without_normal():
 
 
 def test_normal_means_nobody_not_fall_cleared():
-    """NORMAL은 '쓰러짐 해제'가 아니라 '확정 보행자 없음'이다."""
+    """normal은 '쓰러짐 해제'가 아니라 '확정 보행자 없음'이다."""
     serial = FakeSerial()
     extension = build_pipeline([[]])
     combined = CombinedPipeline(
@@ -355,3 +364,200 @@ def test_normal_means_nobody_not_fall_cleared():
         extension=extension, fall=StubFall(False), zones=extension.zones,
     )
     assert combined.process_frame(None, timestamp=0.0).state == STATE_NORMAL
+
+
+# --- CombinedPipeline: 모형 보행자 모터 ---
+#
+# 기동은 아두이노(START), 정지는 파이(모형이 다 건넜다). 판단 자체의 단위 테스트는
+# tests/test_motor.py에 있고, 여기서는 **파이프라인에 제대로 배선됐는지**만 본다.
+
+class RecordingMotor:
+    """StepperMotor 자리에 들어가 호출만 기록한다 (GPIO 없이 배선 확인)."""
+
+    def __init__(self):
+        self.calls = []
+        self.running = False
+        self.mode = None
+
+    def start(self, mode=None):
+        self.calls.append(("start", mode))
+        self.running = True
+        self.mode = mode
+
+    def stop(self):
+        self.calls.append(("stop", None))
+        self.running = False
+        self.mode = None
+
+    def close(self):
+        self.calls.append(("close", None))
+        self.running = False
+
+
+def build_combined_with_motor(boxes_per_frame, inbox=None):
+    serial = FakeSerial(inbox=inbox)
+    extension = build_pipeline(boxes_per_frame)
+    motor = RecordingMotor()
+    combined = CombinedPipeline(
+        camera=object(),
+        detector=FakeDetector(boxes_per_frame),
+        serial_comm=serial,
+        extension=extension,
+        fall=StubFall(False),
+        zones=extension.zones,
+        motor=motor,
+    )
+    return combined, serial, motor
+
+
+def test_motor_starts_on_arduino_start():
+    """아두이노가 START를 보내면 모터가 돈다."""
+    combined, serial, motor = build_combined_with_motor([[]], inbox=[("START", None)])
+    result = combined.process_frame(None, timestamp=0.0)
+    assert motor.calls == [("start", config.MOTOR_DEFAULT_MODE)]
+    assert result.motor_running is True
+
+
+def test_motor_start_passes_speed_mode():
+    combined, serial, motor = build_combined_with_motor([[]], inbox=[("START", 3)])
+    combined.process_frame(None, timestamp=0.0)
+    assert motor.calls == [("start", 3)]
+
+
+def test_motor_does_not_run_without_start():
+    """START 없이 보행자만 보인다고 모터가 돌면 안 된다 — 신호와 무관하게 모형이 움직인다."""
+    boxes = [box_at(50, 100, 1)]
+    combined, serial, motor = build_combined_with_motor([boxes])
+    combined.process_frame(None, timestamp=0.0)
+    assert motor.calls == []
+
+
+def test_motor_survives_the_frames_before_the_model_enters():
+    """★ START 직후에는 아직 아무도 횡단보도 위에 없다 — 여기서 멈추면 출발조차 못 한다."""
+    combined, serial, motor = build_combined_with_motor(
+        [[], [], []], inbox=[("START", None)])
+    for t in (0.0, 0.1, 0.2):
+        result = combined.process_frame(None, timestamp=t)
+        assert result.motor_running is True, f"{t}초에 멈췄다"
+    assert ("stop", None) not in motor.calls
+
+
+def test_motor_stops_when_model_finishes_crossing():
+    """진입 -> 횡단 -> 반대편으로 빠져나감. 나간 프레임에 멈춘다.
+
+    '사라짐'이 아니라 '구역 밖으로 나감'으로 재현한다 — 실제로 모형은 프레임에서
+    사라지는 게 아니라 횡단보도 밖에 계속 보인다. 그리고 그 둘은 처리가 다르다:
+    구역 이탈은 즉시 리셋이지만 미검출은 유예를 받는다(CrosswalkOccupancy).
+    """
+    inside = [box_at(50, 100, 1)]
+    outside = [box_at(50, 250, 1)]          # y=250 -> 횡단보도(0..200) 밖
+    frames = [[], inside, inside, inside, outside]
+    combined, serial, motor = build_combined_with_motor(
+        frames, inbox=[("START", None)])
+
+    for index, t in enumerate((0.0, 0.1, 0.2, 0.3)):
+        result = combined.process_frame(None, timestamp=t)
+        assert result.motor_running is True, f"프레임 {index}에서 멈췄다"
+
+    result = combined.process_frame(None, timestamp=0.4)
+    assert result.motor_running is False
+    assert ("stop", None) in motor.calls
+    assert "횡단" in result.motor_event
+
+
+def test_one_dropped_frame_does_not_stop_the_motor():
+    """★ YOLO가 한 프레임 놓쳤다고 모터가 멈추면, 시연 중간에 모형이 멈춰 선다.
+
+    모터 정지 기준은 아두이노로 보내는 ZONE과 **같은 값**(확정 보행자)이라
+    잔류 유예(TRACK_GRACE_FRAMES)를 그대로 물려받는다. 이 테스트는 그 연결을 고정한다.
+    """
+    inside = [box_at(50, 100, 1)]
+    frames = [inside, inside, [], inside]   # 세 번째 프레임만 놓침
+    combined, serial, motor = build_combined_with_motor(
+        frames, inbox=[("START", None)])
+
+    for index, t in enumerate((0.0, 0.1, 0.2, 0.3)):
+        result = combined.process_frame(None, timestamp=t)
+        assert result.motor_running is True, f"프레임 {index}에서 멈췄다"
+    assert ("stop", None) not in motor.calls
+
+
+def test_motor_stops_on_arduino_stop_command():
+    combined, serial, motor = build_combined_with_motor([[], []], inbox=[("START", None)])
+    combined.process_frame(None, timestamp=0.0)
+
+    serial.inbox = [("STOP", None)]
+    result = combined.process_frame(None, timestamp=0.1)
+    assert result.motor_running is False
+    assert ("stop", None) in motor.calls
+
+
+def test_motor_event_only_on_change():
+    """매 프레임 사유를 찍으면 로그가 묻힌다 — 바뀐 프레임에만 값이 실린다."""
+    combined, serial, motor = build_combined_with_motor(
+        [[], [], []], inbox=[("START", None)])
+    assert combined.process_frame(None, timestamp=0.0).motor_event is not None
+    assert combined.process_frame(None, timestamp=0.1).motor_event is None
+
+
+def test_motor_is_optional():
+    """모형 없이 판정만 확인하는 것이 흔한 사용법이다 — motor=None이어도 죽지 않는다."""
+    serial = FakeSerial(inbox=[("START", None)])
+    extension = build_pipeline([[]])
+    combined = CombinedPipeline(
+        camera=object(), detector=FakeDetector([[]]), serial_comm=serial,
+        extension=extension, fall=StubFall(False), zones=extension.zones,
+    )
+    result = combined.process_frame(None, timestamp=0.0)
+    assert result.motor_running is True      # 판단은 그대로 돈다
+
+
+# --- 쓰러짐 연출 중 구동 모터 일시정지 ---
+
+def test_pause_motor_stops_the_hardware_but_keeps_the_run():
+    inside = [box_at(50, 100, 1)]
+    combined, serial, motor = build_combined_with_motor(
+        [inside] * 6, inbox=[("START", None)])
+    combined.process_frame(None, timestamp=0.0)
+    motor.calls.clear()
+
+    assert combined.pause_motor(now=1.0) is True
+    assert motor.calls == [("stop", None)]          # 실제로 코일 전원이 끊긴다
+
+    result = combined.process_frame(None, timestamp=1.5)
+    assert result.motor_paused is True
+    assert result.motor_running is False            # '움직이는 중'은 아니다
+
+
+def test_resume_motor_restarts_at_the_same_speed_mode():
+    """재개할 때 속도가 기본값으로 되돌아가면 교통약자 시연이 중간에 빨라진다."""
+    inside = [box_at(50, 100, 1)]
+    combined, serial, motor = build_combined_with_motor(
+        [inside] * 6, inbox=[("START", 3)])
+    combined.process_frame(None, timestamp=0.0)
+    combined.pause_motor(now=1.0)
+    motor.calls.clear()
+
+    assert combined.resume_motor(now=5.0) is True
+    assert motor.calls == [("start", 3)]
+
+
+def test_paused_motor_survives_losing_the_person_while_down():
+    """★ 누워 있는 동안 검출이 빠져도 모터가 영구 정지되면 안 된다.
+
+    영구 정지되면 서보가 일으켜 세워도 모형이 다시 안 움직여, 데모가 거기서 끝난다.
+    """
+    inside = [box_at(50, 100, 1)]
+    frames = [inside, [], [], [], inside, inside]
+    combined, serial, motor = build_combined_with_motor(
+        frames, inbox=[("START", None)])
+    combined.process_frame(None, timestamp=0.0)
+    combined.pause_motor(now=0.1)
+
+    for t in (0.2, 0.3, 0.4):
+        result = combined.process_frame(None, timestamp=t)
+        assert result.motor_paused is True
+
+    assert combined.resume_motor(now=0.5) is True
+    result = combined.process_frame(None, timestamp=0.6)
+    assert result.motor_running is True
