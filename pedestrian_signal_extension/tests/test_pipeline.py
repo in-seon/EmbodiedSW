@@ -58,12 +58,12 @@ class FakeSerial:
     def __init__(self):
         self.states = []
 
-    def update_state(self, state, extend_sec=None, eta_sec=None, now=None):
-        self.states.append((state, extend_sec, eta_sec))
+    def update_state(self, state, extend_sec=None, now=None):
+        self.states.append((state, extend_sec))
         return state
 
-    def send_state(self, state, extend_sec=None, eta_sec=None):
-        self.states.append((state, extend_sec, eta_sec))
+    def send_state(self, state, extend_sec=None, now=None):
+        self.states.append((state, extend_sec))
         return state
 
 
@@ -177,35 +177,54 @@ def test_serial_state_carries_extension():
     assert result.serial_state() == (STATE_EXTEND, 5)
 
 
-# --- ETA 전송 (config.USE_SPEED_FOR_EXTENSION) ---
+# --- 보내는 값: ETA 있으면 ETA, 없으면 구역값 ---
 
-def test_eta_is_omitted_when_flag_is_off(monkeypatch):
+def test_uses_zone_value_when_flag_off(monkeypatch):
+    """플래그가 꺼져 있으면 걷고 있어도 구역값을 쓴다 (속도 검증 전까지의 안전한 동작)."""
     monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", False)
     frames = [[box_at(50, 100, 1)], [box_at(50, 120, 1)]]
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
     result = pipeline.process_frame(None, timestamp=1.0)
-    assert result.eta_sec is None
+    assert result.extension_sec == 5              # 3번 구역값
+    assert result.eta_sec is not None             # 계산은 되고 있다(표시용)
 
 
-def test_eta_is_sent_when_flag_is_on(monkeypatch):
-    """걷고 있는 사람이 있으면 ETA가 실린다."""
+def test_uses_eta_when_flag_on(monkeypatch):
+    """걷고 있는 사람이 있으면 보내는 값이 ETA가 된다."""
     monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", True)
+    # 1초에 20px(=10cm) 이동. 3번 구역(y=120)에서 끝(200px=100cm)까지 40cm 남음 -> ETA 4초
     frames = [[box_at(50, 100, 1)], [box_at(50, 120, 1)]]
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
     result = pipeline.process_frame(None, timestamp=1.0)
-    assert result.eta_sec is not None and result.eta_sec > 0
+    assert result.eta_sec is not None
+    assert result.extension_sec == int(__import__("math").ceil(result.eta_sec))
 
 
-def test_standing_person_yields_no_eta(monkeypatch):
-    """서 있는 사람은 ETA를 내지 않는다 — 거대한 값이 아두이노로 나가면 안 된다."""
+def test_falls_back_to_zone_when_standing(monkeypatch):
+    """서 있는 사람은 ETA가 없다 -> 구역값으로 폴백한다.
+
+    가운데 서 있는 사람이야말로 연장이 가장 필요하므로, 여기서 0을 보내면 안 된다.
+    """
     monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", True)
     frames = [[box_at(50, 100, 1)]] * 3
     pipeline = build_pipeline(frames)
     for t in (0.0, 1.0, 2.0):
         result = pipeline.process_frame(None, timestamp=t)
     assert result.eta_sec is None
+    assert result.extension_sec == 5              # 구역값으로 폴백
+
+
+def test_end_zone_is_gated_even_with_eta(monkeypatch):
+    """양 끝 구역은 ETA가 아무리 커도 제외된다 — 구역은 게이트 역할을 유지한다."""
+    monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", True)
+    frames = [[box_at(50, 10, 1)], [box_at(50, 15, 1)]]     # 1번 구역
+    pipeline = build_pipeline(frames)
+    pipeline.process_frame(None, timestamp=0.0)
+    result = pipeline.process_frame(None, timestamp=1.0)
+    assert result.extension_sec == 0
+    assert result.serial_state() == (STATE_NORMAL, None)
 
 
 # --- 교통약자 우선 ---

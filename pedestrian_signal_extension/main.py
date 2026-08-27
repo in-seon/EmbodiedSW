@@ -8,9 +8,9 @@
     파이   : 구역 판정, 잔류 확정, 쓰러짐 확정  -> 아래 세 상태로 요약해 전송
     아두이노: 잔여 녹색 시간, 임계값 판단, 누적 상한, 사이클 리셋, 부저/LED/7세그먼트
 
-        NORMAL              연장 요구 없음 (아무도 없거나 양 끝 구역만)
-        EXTEND <초> <ETA|-> 확정 보행자가 가운데 구역에 있음
-        FALL                쓰러짐 확정
+        NORMAL         연장 요구 없음 (아무도 없거나 양 끝 구역만)
+        EXTEND <초>    **앞으로 필요한 시간**. 아두이노가 잔여를 빼서 연장량을 낸다
+        FALL           쓰러짐 확정
 
 "남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 아두이노만 답할 수 있고, "이 사람이
 몇 번 구역에 있나"는 영상을 보는 파이만 답할 수 있다. 각자 자기만 아는 것을 판단한다.
@@ -49,10 +49,10 @@ class _NullSerial:
     ready = True
     port = "(없음)"
 
-    def update_state(self, state, extend_sec=None, eta_sec=None, now=None):
+    def update_state(self, state, extend_sec=None, now=None):
         return None
 
-    def send_state(self, state, extend_sec=None, eta_sec=None):
+    def send_state(self, state, extend_sec=None, now=None):
         return None
 
     def poll(self):
@@ -139,7 +139,7 @@ class _Reporter:
 def _describe(state, extend_sec, result_line):
     mark = {"FALL": "!! FALL !!", "EXTEND": "EXTEND", "NORMAL": "정상"}.get(state, state)
     if state == "EXTEND":
-        mark = f"EXTEND {extend_sec}"
+        mark = f"EXTEND {extend_sec}s 필요"
     return f"{mark}{result_line}"
 
 

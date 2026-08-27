@@ -16,7 +16,15 @@ PRIORITY_ZONES = {1: 0, 2: 4, 3: 6, 4: 4, 5: 0}
 
 @pytest.fixture
 def rule():
-    return ZoneExtensionRule(zone_extension_sec=ZONES)
+    """일반 맵만 가진 규칙. 우선 맵은 config를 안 타도록 직접 비운다.
+
+    생성자에 None을 넘기면 "지정 안 함"으로 해석돼 config를 읽는다. 그러면 config를
+    만질 때마다 테스트가 깨진다 — 실제로 그렇게 깨진 적이 있다(체인 대입으로 일반 맵까지
+    덮어써진 사고). 테스트는 자기가 쓰는 값을 소유해야 한다.
+    """
+    r = ZoneExtensionRule(zone_extension_sec=ZONES)
+    r.priority_zone_extension_sec = None
+    return r
 
 
 # --- 구역 -> 연장 초 ---
@@ -69,6 +77,20 @@ def test_priority_uses_bigger_numbers():
 def test_priority_falls_back_when_map_undecided(rule):
     """우선 연장 맵이 미정이면 일반 규칙으로 안전하게 대체한다."""
     assert rule.required_sec([Occupant(zone=3)], priority_mode=True) == 5
+
+
+def test_general_and_priority_maps_are_independent():
+    """일반 맵과 우선 맵이 같은 객체를 가리키면 안 된다.
+
+    config에서 `PRIORITY_... = ZONE_... = {...}` 체인 대입을 쓴 적이 있는데, 그러면
+    **일반 보행자에게도 교통약자 값이 나간다.** 조용히 틀리는 종류라 여기서 고정한다.
+    """
+    from config import config as cfg
+
+    assert cfg.ZONE_EXTENSION_SEC is not cfg.PRIORITY_ZONE_EXTENSION_SEC
+    assert cfg.ZONE_EXTENSION_SEC[3] < cfg.PRIORITY_ZONE_EXTENSION_SEC[3], (
+        "교통약자 값이 일반 값보다 커야 한다"
+    )
 
 
 # --- ETA 요약 ---

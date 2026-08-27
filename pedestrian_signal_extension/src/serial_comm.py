@@ -4,14 +4,14 @@
 
 ## 프로토콜: 개행으로 끝나는 ASCII 한 줄
 
-    파이 -> 아두이노              아두이노 -> 파이
-    -------------------------    --------------------------
-    NORMAL                       READY   (부팅 완료)
-    EXTEND <초> <ETA초|->        PONG    (PING에 대한 답)
-    FALL                         ERR <명령>  (모르는 명령)
+    파이 -> 아두이노       아두이노 -> 파이
+    ------------------    --------------------------
+    NORMAL                READY   (부팅 완료)
+    EXTEND <초>           PONG    (PING에 대한 답)
+    FALL                  ERR <명령>  (모르는 명령)
     PING
 
-예: `NORMAL` / `EXTEND 5 7.2` / `EXTEND 3 -` / `FALL`
+예: `NORMAL` / `EXTEND 7` / `FALL`
 
 ## 파이는 '무엇을 보았는가'만 보내고, '언제 적용할까'는 아두이노가 정한다
 
@@ -21,14 +21,21 @@
 "남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 쪽만 답할 수 있고, "이 사람이 몇 번
 구역에 있나"는 영상을 보는 쪽만 답할 수 있다. 각자 자기만 아는 것을 판단하도록 나눴다.
 
-## ETA를 함께 보내는 이유
+## EXTEND 뒤의 숫자는 "연장할 초"가 아니라 "필요한 시간"이다
 
-속도 기반 보정은 `연장 = min(구역값, ceil(ETA x 안전계수 - 잔여시간))` 인데, 파이는
-잔여시간을 모른다. 그래서 **두 숫자를 다 가진 아두이노**가 그 뺄셈을 한다. 파이는 ETA를
-실어 보내기만 하고, `config.USE_SPEED_FOR_EXTENSION`이 False면 자리에 `-`를 넣는다.
+    부족분 = 필요시간 x ETA_SAFETY_MARGIN - 잔여시간      <- 아두이노가 계산
+    연장   = min(부족분, 1회 상한, 남은 예산)
 
-구역값이 상한으로 남으므로 **속도는 연장을 깎기만 하고 늘리지 않는다.** ETA가 없거나(`-`)
-이상하게 커도 구역값을 넘을 수 없다.
+파이는 잔여 시간을 모르므로 뺄셈을 할 수 없다. 뺄셈이 아두이노에서 일어나려면 보내는
+값이 '연장량'이 아니라 '필요 시간'이어야 한다.
+
+그 값은 파이가 이렇게 정한다(src/signal_extend.py):
+
+    ETA가 있으면  -> 실측 속도로 계산한 예상 통과 시간
+    없으면        -> 구역값 (FPS가 낮거나 사람이 멈춰 있으면 자주 이 경로)
+
+**1회 연장 상한은 아두이노가 상수로 갖는다.** ETA가 이상하게 크게 나와도 한 번에
+예산을 다 쓰지 않도록 하는 안전장치다 — docs/team_interface.md 참고.
 
 ## 전송 정책
 
@@ -278,22 +285,23 @@ class SerialComm:
         return self.ready
 
     @staticmethod
-    def format_state(state: str, extend_sec=None, eta_sec=None) -> str:
+    def format_state(state: str, extend_sec=None) -> str:
         """보낼 한 줄을 만든다. 전송과 분리해 둔 이유는 테스트·도구가 그대로 쓰기 위함이다.
 
             NORMAL
-            EXTEND 5 7.2
-            EXTEND 3 -
+            EXTEND 7
             FALL
+
+        EXTEND 뒤의 숫자는 **"앞으로 필요한 시간(초)"**이지 "연장할 초"가 아니다.
+        아두이노가 잔여 시간을 빼서 실제 연장량을 낸다 — src/signal_extend.py 참고.
         """
         if state != STATE_EXTEND:
             return state
         if extend_sec is None:
-            raise ValueError("EXTEND 상태에는 연장 초가 필요합니다.")
-        eta_text = "-" if eta_sec is None else f"{eta_sec:.1f}"
-        return f"{STATE_EXTEND} {int(extend_sec)} {eta_text}"
+            raise ValueError("EXTEND 상태에는 필요 시간(초)이 필요합니다.")
+        return f"{STATE_EXTEND} {int(extend_sec)}"
 
-    def send_state(self, state: str, extend_sec=None, eta_sec=None, now=None) -> str:
+    def send_state(self, state: str, extend_sec=None, now=None) -> str:
         """상태를 **무조건** 한 줄 보낸다 (수동 조작·진단용).
 
         평상시 루프에서는 update_state()를 쓸 것 — 그쪽이 변화 감지와 하트비트를 한다.
@@ -301,13 +309,13 @@ class SerialComm:
         now를 받는 이유: 하트비트 시각을 여기서 찍는데, 호출자가 쓰는 시계와 다르면
         주기가 어긋난다. 테스트에서 시각을 주입할 수 있어야 하는 이유이기도 하다.
         """
-        line = self.format_state(state, extend_sec, eta_sec)
+        line = self.format_state(state, extend_sec)
         self._send(line)
         self._last_state_key = (state, extend_sec)
         self._last_state_sent = time.monotonic() if now is None else now
         return line
 
-    def update_state(self, state: str, extend_sec=None, eta_sec=None, now=None):
+    def update_state(self, state: str, extend_sec=None, now=None):
         """상태를 반영한다. 매 프레임 호출하는 것을 전제로 한다.
 
         전송 규칙 — **상태가 바뀔 때 즉시, 그리고 heartbeat_sec마다 한 번 더.**
@@ -331,9 +339,9 @@ class SerialComm:
 
         key = (state, extend_sec)
         if key != self._last_state_key:
-            return self.send_state(state, extend_sec, eta_sec, now=now)
+            return self.send_state(state, extend_sec, now=now)
         if now - self._last_state_sent >= self.heartbeat_sec:
-            return self.send_state(state, extend_sec, eta_sec, now=now)
+            return self.send_state(state, extend_sec, now=now)
         return None
 
     @property

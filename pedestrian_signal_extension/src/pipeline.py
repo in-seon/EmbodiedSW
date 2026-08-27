@@ -60,8 +60,8 @@ class FrameResult:
     """process_frame 한 번의 결과."""
 
     extension_sec: int = 0
-    # 아두이노로 함께 보낼 예상 통과 시간(초). config.USE_SPEED_FOR_EXTENSION이 꺼져 있거나
-    # 호모그래피가 없거나 아무도 걷고 있지 않으면 None -> 전송 시 '-' 로 나간다.
+    # 실측 ETA (화면 표시·진단용, 전송하지 않는다). None이면 extension_sec이 구역값으로
+    # 폴백된 것이다 — FPS가 낮거나 사람이 멈춰 있으면 그렇게 된다.
     eta_sec: object = None
     occupied_zones: list = field(default_factory=list)
     pedestrians: list = field(default_factory=list)  # PedestrianState 목록
@@ -155,13 +155,12 @@ class SignalExtensionPipeline:
             for track_id, zone in confirmed.items()
         ]
 
+        # 보내는 값은 '연장할 초'가 아니라 '앞으로 필요한 시간'이다.
+        # ETA가 있으면 그 값이, 없으면 구역값이 들어간다(src/signal_extend.py).
         extension_sec = self.rule.required_sec(occupants, priority_mode=priority_mode)
-        # ETA는 config.USE_SPEED_FOR_EXTENSION이 켜져 있을 때만 실어 보낸다.
-        # 꺼져 있으면 자리에 '-'가 나가고 아두이노는 구역값을 그대로 쓴다.
-        eta_sec = (
-            self.rule.max_eta_sec(occupants)
-            if config.USE_SPEED_FOR_EXTENSION else None
-        )
+        # 아래는 전송이 아니라 **화면 표시용**이다. ETA가 실제로 나오고 있는지 눈으로
+        # 확인하기 위한 것 — 계속 None이면 구역값으로 폴백되고 있다는 뜻이다.
+        eta_sec = self.rule.max_eta_sec(occupants)
 
         return FrameResult(
             extension_sec=extension_sec,
@@ -180,7 +179,7 @@ class SignalExtensionPipeline:
             for frame in self.camera.frames():
                 result = self.process_frame(frame)
                 state, extend = result.serial_state()
-                self.serial_comm.update_state(state, extend, result.eta_sec)
+                self.serial_comm.update_state(state, extend)
                 if on_result is not None and on_result(result, frame) is False:
                     break
 
@@ -353,7 +352,7 @@ class CombinedPipeline:
         else:
             state, extend = ext_result.serial_state()
 
-        line = self.serial_comm.update_state(state, extend, ext_result.eta_sec, now=now)
+        line = self.serial_comm.update_state(state, extend, now=now)
         return CombinedResult(
             fall=fall_result, extension=ext_result,
             state=state, extend_sec=extend, line_sent=line,
@@ -379,8 +378,8 @@ class _NoSend:
     한 번만 보낸다.
     """
 
-    def update_state(self, state, extend_sec=None, eta_sec=None, now=None):
+    def update_state(self, state, extend_sec=None, now=None):
         return None
 
-    def send_state(self, state, extend_sec=None, eta_sec=None):
+    def send_state(self, state, extend_sec=None, now=None):
         return None

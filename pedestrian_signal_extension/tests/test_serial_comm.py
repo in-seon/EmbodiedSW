@@ -119,9 +119,9 @@ def test_state_change_sends_immediately():
     comm.open()
 
     comm.update_state(STATE_NORMAL, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 5, now=0.1) == "EXTEND 5 -"
+    assert comm.update_state(STATE_EXTEND, 5, now=0.1) == "EXTEND 5"
     assert comm.update_state(STATE_FALL, now=0.2) == "FALL"
-    assert fake.sent == ["NORMAL", "EXTEND 5 -", "FALL"]
+    assert fake.sent == ["NORMAL", "EXTEND 5", "FALL"]
 
 
 def test_extend_seconds_change_counts_as_change():
@@ -130,30 +130,30 @@ def test_extend_seconds_change_counts_as_change():
     comm.open()
 
     comm.update_state(STATE_EXTEND, 3, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 5, now=0.1) == "EXTEND 5 -"
-    assert fake.sent == ["EXTEND 3 -", "EXTEND 5 -"]
+    assert comm.update_state(STATE_EXTEND, 5, now=0.1) == "EXTEND 5"
+    assert fake.sent == ["EXTEND 3", "EXTEND 5"]
 
 
-def test_eta_change_alone_does_not_resend():
-    """ETA는 걷는 동안 매 프레임 변한다 — 변화 판정에 넣으면 매 프레임 전송이 된다."""
+def test_same_need_does_not_resend():
+    """필요 시간이 그대로면 재전송하지 않는다 (하트비트 전까지)."""
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 
-    comm.update_state(STATE_EXTEND, 5, eta_sec=7.2, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 5, eta_sec=7.1, now=0.1) is None
-    assert comm.update_state(STATE_EXTEND, 5, eta_sec=6.9, now=0.2) is None
-    assert fake.sent == ["EXTEND 5 7.2"]
+    comm.update_state(STATE_EXTEND, 7, now=0.0)
+    assert comm.update_state(STATE_EXTEND, 7, now=0.1) is None
+    assert comm.update_state(STATE_EXTEND, 7, now=0.2) is None
+    assert fake.sent == ["EXTEND 7"]
 
 
-def test_heartbeat_resends_with_fresh_eta():
-    """하트비트로 재전송할 때는 최신 ETA를 싣는다 — 유실 복구 + 값 갱신을 동시에 한다."""
+def test_heartbeat_resends_current_need():
+    """하트비트로 재전송할 때는 그 시점의 최신 값을 싣는다 (유실 복구 + 값 갱신)."""
     comm, fake = make_comm("READY", heartbeat_sec=1.0)
     comm.open()
 
-    comm.update_state(STATE_EXTEND, 5, eta_sec=7.2, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 5, eta_sec=7.1, now=0.5) is None
-    assert comm.update_state(STATE_EXTEND, 5, eta_sec=6.2, now=1.0) == "EXTEND 5 6.2"
-    assert fake.sent == ["EXTEND 5 7.2", "EXTEND 5 6.2"]
+    comm.update_state(STATE_EXTEND, 7, now=0.0)
+    assert comm.update_state(STATE_EXTEND, 7, now=0.5) is None
+    assert comm.update_state(STATE_EXTEND, 7, now=1.0) == "EXTEND 7"
+    assert fake.sent == ["EXTEND 7", "EXTEND 7"]
 
 
 def test_ready_line_forces_resend():
@@ -170,11 +170,11 @@ def test_ready_line_forces_resend():
 # --- 줄 포맷 ---
 
 @pytest.mark.parametrize("args,expected", [
-    ((STATE_NORMAL, None, None), "NORMAL"),
-    ((STATE_FALL, None, None), "FALL"),
-    ((STATE_EXTEND, 5, None), "EXTEND 5 -"),
-    ((STATE_EXTEND, 3, 7.25), "EXTEND 3 7.2"),
-    ((STATE_EXTEND, 5, 12.0), "EXTEND 5 12.0"),
+    ((STATE_NORMAL, None), "NORMAL"),
+    ((STATE_FALL, None), "FALL"),
+    ((STATE_EXTEND, 5), "EXTEND 5"),
+    ((STATE_EXTEND, 3), "EXTEND 3"),
+    ((STATE_EXTEND, 12), "EXTEND 12"),
 ])
 def test_format_state(args, expected):
     assert SerialComm.format_state(*args) == expected
@@ -246,7 +246,7 @@ def test_context_manager_opens_and_closes():
     fake = FakeSerial("READY")
     with SerialComm(connection=fake) as comm:
         comm.update_state(STATE_EXTEND, 5, now=0.0)
-    assert fake.sent == ["EXTEND 5 -", "NORMAL"]
+    assert fake.sent == ["EXTEND 5", "NORMAL"]
     assert fake.closed is True
 
 

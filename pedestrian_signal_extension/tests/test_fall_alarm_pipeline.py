@@ -44,14 +44,14 @@ class SpySerial:
         self.state = None
         self.closed = False
 
-    def update_state(self, state, extend_sec=None, eta_sec=None, now=None):
+    def update_state(self, state, extend_sec=None, now=None):
         if state == self.state:
             return None
         self.state = state
         self.commands.append(state)
         return state
 
-    def send_state(self, state, extend_sec=None, eta_sec=None, now=None):
+    def send_state(self, state, extend_sec=None, now=None):
         self.state = state
         self.commands.append(state)
         return state
