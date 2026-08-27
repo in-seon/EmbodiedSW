@@ -152,7 +152,13 @@ def test_occupancy_resets_when_leaving_crosswalk():
     assert occ.update([("p1", (25, 5))]) == {}  # 다시 처음부터
 
 
-def test_occupancy_missing_config_raises():
+def test_occupancy_missing_config_raises(monkeypatch):
+    """config가 비어 있으면 임의값으로 동작하지 않고 명시적으로 실패한다.
+
+    config를 직접 비운다 — 인자로 None을 넘기면 "지정 안 함"으로 해석돼 config를 읽으므로,
+    config에 값이 채워지는 순간 이 테스트가 무의미해진다(실제로 그렇게 깨진 적이 있다).
+    """
+    monkeypatch.setattr(config, "ZONE_RESIDENCY_FRAMES", None)
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     with pytest.raises(NotImplementedError):
         CrosswalkOccupancy(zones, confirm_frames=None)
