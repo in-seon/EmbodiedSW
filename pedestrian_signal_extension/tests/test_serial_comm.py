@@ -108,10 +108,10 @@ def test_state_sent_on_change_only():
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 
-    assert comm.update_state(STATE_NORMAL, now=0.0) == "NORMAL"
+    assert comm.update_state(STATE_NORMAL, now=0.0) == "normal"
     assert comm.update_state(STATE_NORMAL, now=1.0) is None    # 매 프레임 보내지 않는다
     assert comm.update_state(STATE_NORMAL, now=2.0) is None
-    assert fake.sent == ["NORMAL"]
+    assert fake.sent == ["normal"]
 
 
 def test_state_change_sends_immediately():
@@ -119,9 +119,9 @@ def test_state_change_sends_immediately():
     comm.open()
 
     comm.update_state(STATE_NORMAL, now=0.0)
-    assert comm.update_state(STATE_ZONE, 5, now=0.1) == "ZONE 5"
-    assert comm.update_state(STATE_FALL, now=0.2) == "FALL"
-    assert fake.sent == ["NORMAL", "ZONE 5", "FALL"]
+    assert comm.update_state(STATE_ZONE, 5, now=0.1) == "zone5"
+    assert comm.update_state(STATE_FALL, now=0.2) == "fall"
+    assert fake.sent == ["normal", "zone5", "fall"]
 
 
 def test_zone_change_counts_as_change():
@@ -130,8 +130,8 @@ def test_zone_change_counts_as_change():
     comm.open()
 
     comm.update_state(STATE_ZONE, 3, now=0.0)
-    assert comm.update_state(STATE_ZONE, 5, now=0.1) == "ZONE 5"
-    assert fake.sent == ["ZONE 3", "ZONE 5"]
+    assert comm.update_state(STATE_ZONE, 5, now=0.1) == "zone5"
+    assert fake.sent == ["zone3", "zone5"]
 
 
 def test_same_zone_does_not_resend():
@@ -145,7 +145,7 @@ def test_same_zone_does_not_resend():
     comm.update_state(STATE_ZONE, 7, now=0.0)
     assert comm.update_state(STATE_ZONE, 7, now=0.1) is None
     assert comm.update_state(STATE_ZONE, 7, now=0.2) is None
-    assert fake.sent == ["ZONE 7"]
+    assert fake.sent == ["zone7"]
 
 
 def test_heartbeat_resends_current_zone():
@@ -155,8 +155,8 @@ def test_heartbeat_resends_current_zone():
 
     comm.update_state(STATE_ZONE, 7, now=0.0)
     assert comm.update_state(STATE_ZONE, 7, now=0.5) is None
-    assert comm.update_state(STATE_ZONE, 7, now=1.0) == "ZONE 7"
-    assert fake.sent == ["ZONE 7", "ZONE 7"]
+    assert comm.update_state(STATE_ZONE, 7, now=1.0) == "zone7"
+    assert fake.sent == ["zone7", "zone7"]
 
 
 def test_ready_line_forces_resend():
@@ -166,18 +166,18 @@ def test_ready_line_forces_resend():
 
     comm.update_state(STATE_FALL, now=0.0)
     fake.feed("READY")                                   # 보드 재부팅
-    assert comm.update_state(STATE_FALL, now=0.1) == "FALL"
-    assert fake.sent == ["FALL", "FALL"]
+    assert comm.update_state(STATE_FALL, now=0.1) == "fall"
+    assert fake.sent == ["fall", "fall"]
 
 
 # --- 줄 포맷 ---
 
 @pytest.mark.parametrize("args,expected", [
-    ((STATE_NORMAL, None), "NORMAL"),
-    ((STATE_FALL, None), "FALL"),
-    ((STATE_ZONE, 5), "ZONE 5"),
-    ((STATE_ZONE, 3), "ZONE 3"),
-    ((STATE_ZONE, 12), "ZONE 12"),
+    ((STATE_NORMAL, None), "normal"),
+    ((STATE_FALL, None), "fall"),
+    ((STATE_ZONE, 5), "zone5"),
+    ((STATE_ZONE, 3), "zone3"),
+    ((STATE_ZONE, 12), "zone12"),
 ])
 def test_format_state(args, expected):
     assert SerialComm.format_state(*args) == expected
@@ -231,7 +231,7 @@ def test_close_returns_to_normal():
 
     comm.update_state(STATE_FALL, now=0.0)
     comm.close()
-    assert fake.sent == ["FALL", "NORMAL"]
+    assert fake.sent == ["fall", "normal"]
     assert fake.closed is True
 
 
@@ -241,7 +241,7 @@ def test_close_from_normal_sends_nothing():
 
     comm.update_state(STATE_NORMAL, now=0.0)
     comm.close()
-    assert fake.sent == ["NORMAL"]          # 종료 시 추가 전송 없음
+    assert fake.sent == ["normal"]          # 종료 시 추가 전송 없음
     assert fake.closed is True
 
 
@@ -249,7 +249,7 @@ def test_context_manager_opens_and_closes():
     fake = FakeSerial("READY")
     with SerialComm(connection=fake) as comm:
         comm.update_state(STATE_ZONE, 5, now=0.0)
-    assert fake.sent == ["ZONE 5", "NORMAL"]
+    assert fake.sent == ["zone5", "normal"]
     assert fake.closed is True
 
 
@@ -266,4 +266,82 @@ def test_send_state_always_sends():
 
     comm.send_state(STATE_FALL)
     comm.send_state(STATE_FALL)
-    assert fake.sent == ["FALL", "FALL"]
+    assert fake.sent == ["fall", "fall"]
+
+
+# --- 아두이노 -> 파이 명령 (START/STOP) ---
+#
+# 모터가 파이 GPIO에 붙어 있어서 생긴 방향이다. 기동 시점은 신호를 소유한 아두이노만
+# 알고, 정지 시점은 영상을 보는 파이만 안다 — src/motor.py MotorGate 참고.
+
+def test_start_command_is_queued():
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("START")
+    comm.poll()
+    assert comm.take_commands() == [("START", None)]
+
+
+def test_start_command_carries_speed_mode():
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("START 3")
+    comm.poll()
+    assert comm.take_commands() == [("START", 3)]
+
+
+def test_stop_command_is_queued():
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("STOP")
+    comm.poll()
+    assert comm.take_commands() == [("STOP", None)]
+
+
+def test_take_commands_drains_the_queue():
+    """★ 같은 START를 두 번 처리하면 안전 타임아웃 시계가 리셋돼 안전장치가 무력해진다."""
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("START")
+    comm.poll()
+    assert comm.take_commands() == [("START", None)]
+    assert comm.take_commands() == []
+
+
+def test_garbled_mode_falls_back_to_default():
+    """회선 노이즈로 인자가 깨져도 비전 루프를 죽이지 않는다 — 기본 속도로 돈다."""
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("START x9")
+    comm.poll()
+    assert comm.take_commands() == [("START", None)]
+
+
+def test_unknown_line_is_not_queued():
+    """모르는 줄은 명령으로 오해하지 않는다."""
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("SOMETHING ELSE")
+    comm.poll()
+    assert comm.take_commands() == []
+
+
+def test_ready_and_pong_are_not_commands():
+    comm, fake = make_comm("READY")
+    comm.open()
+    fake.feed("PONG")
+    comm.poll()
+    assert comm.take_commands() == []
+
+
+def test_reopen_discards_stale_commands():
+    """재연결 시 이전 세션의 START가 남아 있으면, 아두이노가 보내지도 않은 시점에 모터가 돈다."""
+    fake = FakeSerial("READY")
+    comm = SerialComm(connection=fake)
+    comm.open()
+    fake.feed("START")
+    comm.poll()
+
+    fake.feed("READY")          # 보드 재부팅
+    comm.open()
+    assert comm.take_commands() == []

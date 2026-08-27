@@ -6,12 +6,22 @@
 
     파이 -> 아두이노       아두이노 -> 파이
     ------------------    --------------------------
-    NORMAL                READY   (부팅 완료)
-    ZONE <1..N>           PONG    (PING에 대한 답)
-    FALL                  ERR <명령>  (모르는 명령)
-    PING
+    normal                READY   (부팅 완료)
+    zone<1..N>            PONG    (PING에 대한 답)
+    fall                  START [모드]  (녹색 시작 -> 모형 보행자 출발)
+    PING                  STOP          (즉시 정지)
 
-예: `NORMAL` / `ZONE 2` / `FALL`
+예: `normal` / `zone2` / `fall` / `START` / `START 3`
+
+⚠️ 파이가 보내는 상태는 **소문자**이고 zone 뒤 숫자는 **붙여 쓴다**(`zone2`, `zone 2` 아님).
+아두이노가 보내는 것은 대문자다. 방향에 따라 표기가 다르니 파싱할 때 주의할 것.
+
+## 왜 아두이노가 파이에게 명령을 하는가 (START/STOP)
+
+모형 보행자를 움직이는 스텝모터가 **아두이노가 아니라 파이 GPIO에 붙어 있다**(아두이노
+쪽 핀이 모자랐다). 그런데 "보행 녹색이 언제 시작됐는가"는 신호를 소유한 아두이노만 안다.
+그래서 이 한 방향만 뒤집힌다. 반대로 "모형이 횡단보도를 빠져나갔는가"는 영상을 보는
+파이만 알므로, 정지는 파이가 스스로 판단한다(src/motor.py MotorGate).
 
 ## 파이는 '무엇을 보았는가'만 보내고, '언제 적용할까'는 아두이노가 정한다
 
@@ -21,7 +31,7 @@
 "남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 쪽만 답할 수 있고, "이 사람이 몇 번
 구역에 있나"는 영상을 보는 쪽만 답할 수 있다. 각자 자기만 아는 것을 판단하도록 나눴다.
 
-## ZONE 뒤의 숫자는 '진척도'다 — 물리 구역 번호가 아니다
+## zone 뒤의 숫자는 '진척도'다 — 물리 구역 번호가 아니다
 
 확정 보행자 중 **가장 덜 건넌 사람**의 진척도(1..N)를 보낸다.
 
@@ -64,10 +74,32 @@ from config import config
 _ARDUINO_VIDS = (0x2341, 0x2A03, 0x1A86, 0x0403)
 
 # 파이가 보낼 수 있는 상태. 문자열을 여기 모아 두어 오타로 조용히 어긋나지 않게 한다.
-# 우선순위: FALL > EXTEND > NORMAL (쓰러진 사람이 있으면 연장 요구보다 그쪽이 급하다).
-STATE_NORMAL = "NORMAL"
-STATE_ZONE = "ZONE"
-STATE_FALL = "FALL"
+# 우선순위: fall > zone > normal (쓰러진 사람이 있으면 연장 요구보다 그쪽이 급하다).
+STATE_NORMAL = "normal"
+STATE_ZONE = "zone"
+STATE_FALL = "fall"
+
+# 아두이노 -> 파이 명령. 모터가 파이 GPIO에 붙어 있어서 생긴 방향이다(아두이노 핀 부족).
+#   START [모드]  보행 녹색이 시작됐다 -> 모형 보행자를 출발시켜라
+#   STOP          즉시 세워라 (적색 전환 등, 아두이노가 명시적으로 멈추고 싶을 때)
+# 모드는 선택이다. 그냥 "START"만 보내면 config.MOTOR_DEFAULT_MODE로 돈다.
+CMD_START = "START"
+CMD_STOP = "STOP"
+
+
+def _parse_mode(text: str):
+    """START 뒤에 붙은 속도 모드를 읽는다. 없거나 숫자가 아니면 None(기본 모드).
+
+    잘못된 인자에 예외를 던지지 않는 이유: 이 값은 **전기 노이즈를 탈 수 있는 회선**에서
+    온다. 한 글자가 깨졌다고 비전 루프를 죽이는 것보다, 기본 속도로 도는 편이 낫다.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 class SerialComm:
@@ -100,6 +132,7 @@ class SerialComm:
         self._last_state_key = (None, None)
         self._last_state_sent = 0.0
         self.ready = False          # READY 또는 PONG을 받아 연결이 확인됐는지
+        self._pending = []          # 아두이노가 보낸 명령 (take_commands로 꺼낸다)
         self.recent_lines = []      # 최근 수신 줄 (진단·도구 표시용, 최대 50줄)
 
     # ------------------------------------------------------------------
@@ -166,6 +199,9 @@ class SerialComm:
         self._rx = b""
         self._last_state_key = (None, None)
         self.ready = False
+        # 재연결이라면 이전 세션의 명령이 남아 있을 수 있다. 그걸 실행하면
+        # 아두이노가 보내지도 않은 시점에 모터가 돈다.
+        self._pending = []
         self._wait_until_ready()
         return self
 
@@ -201,10 +237,10 @@ class SerialComm:
         )
 
     def close(self):
-        """NORMAL로 되돌리고 포트를 닫는다.
+        """normal로 되돌리고 포트를 닫는다.
 
-        NORMAL을 먼저 보내는 이유: 파이 쪽 프로그램이 끝나도 아두이노는 마지막 상태를
-        그대로 들고 있다. FALL로 끝나면 부저가 계속 울리고, EXTEND로 끝나면 다음 사이클에
+        normal을 먼저 보내는 이유: 파이 쪽 프로그램이 끝나도 아두이노는 마지막 상태를
+        그대로 들고 있다. fall로 끝나면 부저가 계속 울리고, zone으로 끝나면 다음 사이클에
         의도치 않은 연장이 붙는다. 아두이노의 무신호 워치독이 결국 되돌리겠지만,
         그때까지의 동작은 그냥 고장으로 보인다.
         """
@@ -222,6 +258,7 @@ class SerialComm:
             self._conn = None
             self._last_state_key = (None, None)
             self.ready = False
+            self._pending = []
 
     def __enter__(self):
         return self.open()
@@ -273,8 +310,26 @@ class SerialComm:
                 # '마지막으로 보낸 상태'도 무효다. 비워 두면 다음 update_state()가
                 # 하트비트를 기다리지 않고 곧바로 현재 상태를 다시 보낸다.
                 self._last_state_key = (None, None)
+            return
+
+        head, _, rest = line.partition(" ")
+        if head in (CMD_START, CMD_STOP):
+            self._pending.append((head, _parse_mode(rest)))
         # 아두이노 -> 파이 방향으로 메시지가 늘어나면 여기에 분기를 추가한다.
         # (잔여 시간·사이클은 제어부가 소유하므로 파이로 올려보낼 필요가 없다.)
+
+    def take_commands(self):
+        """아두이노가 보낸 명령을 꺼내고 **비운다**. [(명령, 인자)] 목록.
+
+        큐로 두는 이유: poll()은 파이프라인 곳곳에서 불리는데, 그 자리에서 모터를
+        건드리면 하드웨어 제어가 통신 계층에 흩어진다. 여기서는 받아 두기만 하고,
+        누가 언제 처리할지는 파이프라인이 정한다.
+
+        꺼내면서 비우므로 **같은 명령을 두 번 처리하지 않는다.** START가 두 번
+        실행되면 안전 타임아웃 시계가 리셋돼 안전장치가 무력해진다.
+        """
+        commands, self._pending = self._pending, []
+        return commands
 
     # ------------------------------------------------------------------
     # 상태 전송 — 이 채널의 본체
@@ -290,18 +345,21 @@ class SerialComm:
     def format_state(state: str, zone=None) -> str:
         """보낼 한 줄을 만든다. 전송과 분리해 둔 이유는 테스트·도구가 그대로 쓰기 위함이다.
 
-            NORMAL
-            ZONE 2
-            FALL
+            normal
+            zone2
+            fall
 
-        ZONE 뒤의 숫자는 **진척도**(1 = 방금 진입, N = 거의 다 건넜음)이지 물리 구역
+        **숫자를 붙여 쓴다**(`zone2`). 공백으로 나누면 아두이노가 토큰을 쪼개야 하는데,
+        한 줄이 짧을수록 파싱이 단순하고 수신 버퍼도 덜 찬다.
+
+        zone 뒤의 숫자는 **진척도**(1 = 방금 진입, N = 거의 다 건넜음)이지 물리 구역
         번호가 아니다 — 모듈 docstring 참고.
         """
         if state != STATE_ZONE:
             return state
         if zone is None:
-            raise ValueError("ZONE 상태에는 진척도가 필요합니다.")
-        return f"{STATE_ZONE} {int(zone)}"
+            raise ValueError("zone 상태에는 진척도가 필요합니다.")
+        return f"{STATE_ZONE}{int(zone)}"
 
     def send_state(self, state: str, zone=None, now=None) -> str:
         """상태를 **무조건** 한 줄 보낸다 (수동 조작·진단용).
