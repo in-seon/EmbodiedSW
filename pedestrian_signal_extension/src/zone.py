@@ -272,3 +272,91 @@ class CrosswalkOccupancy:
     def clear(self):
         self._state.clear()
         self.untracked_count = 0
+
+
+class CrossingProgress:
+    """track_id별 '얼마나 건넜는가'(진척도 1..N)를 낸다.
+
+    ## 왜 물리 구역 번호를 그대로 쓸 수 없는가
+
+    구역 번호는 **좌표계 기준**이라 진입 방향에 따라 의미가 뒤집힌다. 물리적으로 같은
+    2번 구역에 있어도, 1번에서 들어온 사람은 대부분 남았고 5번에서 온 사람은 거의 다
+    건넜다. 같은 번호를 보내면 아두이노가 둘을 구분할 수 없다.
+
+    그래서 사람마다 **자기 진입점 기준으로** 번호를 다시 매긴다:
+
+        진척도 1 = 방금 진입      진척도 N = 거의 다 건넘
+
+    ## 방향을 어떻게 아는가 — 속도를 쓰지 않는다
+
+    **첫 검출 구역**으로 판별한다. 중앙보다 앞쪽에서 처음 보였으면 정방향, 뒤쪽이면
+    역방향이다. 속도 추정과 달리 프레임률 요구가 없고(위치 이력만 보면 된다), 사람이
+    멈춰 있어도 판별이 유지된다.
+
+    중앙에서 처음 보이면 방향을 알 수 없다(track_id 재발급 등). 그때는 **중앙값으로
+    간주**하고, 이후 구역이 바뀌면 그 방향으로 확정한다. 3번에서 시작해 4번으로 가면
+    정방향이 확정되어 진척도도 4가 되고, 2번으로 가면 역방향이 확정되어 진척도가
+    6-2=4가 된다 — 어느 쪽이든 "중앙에서 한 칸 더 갔다"로 수렴한다.
+
+    ## 오판하면 어느 쪽으로 틀리는가
+
+    첫 검출이 실제 진입점이 아니면(중간에 ID가 재발급되면) 방향을 반대로 볼 수 있다.
+    그때 진척도는 **실제보다 작게** 나오고, 작은 진척도는 곧 '덜 왔다'이므로 아두이노가
+    **더 연장하는** 쪽으로 틀린다. 보행자가 도로에 갇히는 것보다 차가 조금 더 기다리는
+    것이 낫다는 이 프로젝트의 기존 판단과 같은 방향의 오차다.
+    """
+
+    def __init__(self, zone_count=None):
+        self.zone_count = zone_count or config.CROSSWALK_ZONE_COUNT
+        # track_id -> +1(정방향) / -1(역방향) / None(아직 모름)
+        self._direction = {}
+        # track_id -> 처음 검출된 구역 번호
+        self._first_zone = {}
+
+    @property
+    def _middle(self) -> float:
+        """중앙 구역 번호. 5구역이면 3.0, 짝수면 경계값(예: 4구역이면 2.5)."""
+        return (self.zone_count + 1) / 2
+
+    def update(self, track_id, zone) -> int:
+        """이번 프레임 구역을 반영하고 진척도(1..N)를 돌려준다."""
+        if track_id not in self._first_zone:
+            self._first_zone[track_id] = zone
+            if zone < self._middle:
+                self._direction[track_id] = 1
+            elif zone > self._middle:
+                self._direction[track_id] = -1
+            else:
+                self._direction[track_id] = None      # 중앙에서 시작 — 아직 모름
+        elif self._direction[track_id] is None and zone != self._first_zone[track_id]:
+            # 중앙에서 시작한 사람이 움직였다 -> 그 방향으로 확정
+            self._direction[track_id] = 1 if zone > self._first_zone[track_id] else -1
+
+        return self.progress(track_id, zone)
+
+    def progress(self, track_id, zone) -> int:
+        """저장된 방향으로 구역 번호를 진척도로 바꾼다(상태를 갱신하지 않는다)."""
+        direction = self._direction.get(track_id)
+        if direction is None:
+            return zone                                # 방향 미정 -> 물리 구역 그대로
+        return zone if direction > 0 else self.zone_count + 1 - zone
+
+    def direction(self, track_id):
+        """+1 / -1 / None(미정). 화면 표시·진단용."""
+        return self._direction.get(track_id)
+
+    def forget(self, track_id):
+        """트랙이 사라졌을 때 호출. 안 지우면 ID가 재사용될 때 옛 방향이 따라붙는다."""
+        self._direction.pop(track_id, None)
+        self._first_zone.pop(track_id, None)
+
+    def keep_only(self, track_ids):
+        """살아 있는 트랙만 남긴다."""
+        alive = set(track_ids)
+        for track_id in list(self._first_zone):
+            if track_id not in alive:
+                self.forget(track_id)
+
+    def clear(self):
+        self._direction.clear()
+        self._first_zone.clear()

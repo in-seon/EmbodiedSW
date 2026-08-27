@@ -7,7 +7,7 @@
 import pytest
 
 from src.serial_comm import (
-    STATE_EXTEND,
+    STATE_ZONE,
     STATE_FALL,
     STATE_NORMAL,
     SerialComm,
@@ -119,41 +119,44 @@ def test_state_change_sends_immediately():
     comm.open()
 
     comm.update_state(STATE_NORMAL, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 5, now=0.1) == "EXTEND 5"
+    assert comm.update_state(STATE_ZONE, 5, now=0.1) == "ZONE 5"
     assert comm.update_state(STATE_FALL, now=0.2) == "FALL"
-    assert fake.sent == ["NORMAL", "EXTEND 5", "FALL"]
+    assert fake.sent == ["NORMAL", "ZONE 5", "FALL"]
 
 
-def test_extend_seconds_change_counts_as_change():
-    """3초 -> 5초는 다른 요구다. 상태 이름만 비교하면 이 변화를 놓친다."""
+def test_zone_change_counts_as_change():
+    """진척도 3 -> 5는 다른 상황이다. 상태 이름만 비교하면 이 변화를 놓친다."""
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 
-    comm.update_state(STATE_EXTEND, 3, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 5, now=0.1) == "EXTEND 5"
-    assert fake.sent == ["EXTEND 3", "EXTEND 5"]
+    comm.update_state(STATE_ZONE, 3, now=0.0)
+    assert comm.update_state(STATE_ZONE, 5, now=0.1) == "ZONE 5"
+    assert fake.sent == ["ZONE 3", "ZONE 5"]
 
 
-def test_same_need_does_not_resend():
-    """필요 시간이 그대로면 재전송하지 않는다 (하트비트 전까지)."""
+def test_same_zone_does_not_resend():
+    """진척도가 그대로면 재전송하지 않는다 (하트비트 전까지).
+
+    사람이 움직여도 같은 진척도 안에 머무르면 아두이노 입장에서 같은 상황이다.
+    """
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 
-    comm.update_state(STATE_EXTEND, 7, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 7, now=0.1) is None
-    assert comm.update_state(STATE_EXTEND, 7, now=0.2) is None
-    assert fake.sent == ["EXTEND 7"]
+    comm.update_state(STATE_ZONE, 7, now=0.0)
+    assert comm.update_state(STATE_ZONE, 7, now=0.1) is None
+    assert comm.update_state(STATE_ZONE, 7, now=0.2) is None
+    assert fake.sent == ["ZONE 7"]
 
 
-def test_heartbeat_resends_current_need():
+def test_heartbeat_resends_current_zone():
     """하트비트로 재전송할 때는 그 시점의 최신 값을 싣는다 (유실 복구 + 값 갱신)."""
     comm, fake = make_comm("READY", heartbeat_sec=1.0)
     comm.open()
 
-    comm.update_state(STATE_EXTEND, 7, now=0.0)
-    assert comm.update_state(STATE_EXTEND, 7, now=0.5) is None
-    assert comm.update_state(STATE_EXTEND, 7, now=1.0) == "EXTEND 7"
-    assert fake.sent == ["EXTEND 7", "EXTEND 7"]
+    comm.update_state(STATE_ZONE, 7, now=0.0)
+    assert comm.update_state(STATE_ZONE, 7, now=0.5) is None
+    assert comm.update_state(STATE_ZONE, 7, now=1.0) == "ZONE 7"
+    assert fake.sent == ["ZONE 7", "ZONE 7"]
 
 
 def test_ready_line_forces_resend():
@@ -172,17 +175,17 @@ def test_ready_line_forces_resend():
 @pytest.mark.parametrize("args,expected", [
     ((STATE_NORMAL, None), "NORMAL"),
     ((STATE_FALL, None), "FALL"),
-    ((STATE_EXTEND, 5), "EXTEND 5"),
-    ((STATE_EXTEND, 3), "EXTEND 3"),
-    ((STATE_EXTEND, 12), "EXTEND 12"),
+    ((STATE_ZONE, 5), "ZONE 5"),
+    ((STATE_ZONE, 3), "ZONE 3"),
+    ((STATE_ZONE, 12), "ZONE 12"),
 ])
 def test_format_state(args, expected):
     assert SerialComm.format_state(*args) == expected
 
 
-def test_extend_without_seconds_raises():
+def test_zone_without_number_raises():
     with pytest.raises(ValueError):
-        SerialComm.format_state(STATE_EXTEND)
+        SerialComm.format_state(STATE_ZONE)
 
 
 # --- 수신 파싱 ---
@@ -245,8 +248,8 @@ def test_close_from_normal_sends_nothing():
 def test_context_manager_opens_and_closes():
     fake = FakeSerial("READY")
     with SerialComm(connection=fake) as comm:
-        comm.update_state(STATE_EXTEND, 5, now=0.0)
-    assert fake.sent == ["EXTEND 5", "NORMAL"]
+        comm.update_state(STATE_ZONE, 5, now=0.0)
+    assert fake.sent == ["ZONE 5", "NORMAL"]
     assert fake.closed is True
 
 

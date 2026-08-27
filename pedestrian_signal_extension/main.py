@@ -8,8 +8,8 @@
     파이   : 구역 판정, 잔류 확정, 쓰러짐 확정  -> 아래 세 상태로 요약해 전송
     아두이노: 잔여 녹색 시간, 임계값 판단, 누적 상한, 사이클 리셋, 부저/LED/7세그먼트
 
-        NORMAL         연장 요구 없음 (아무도 없거나 양 끝 구역만)
-        EXTEND <초>    **앞으로 필요한 시간**. 아두이노가 잔여를 빼서 연장량을 낸다
+        NORMAL         횡단보도에 확정 보행자가 없음
+        ZONE <1..5>    가장 덜 건넌 사람의 **진척도**(1=방금 진입, 5=거의 다 건넘)
         FALL           쓰러짐 확정
 
 "남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 아두이노만 답할 수 있고, "이 사람이
@@ -49,10 +49,10 @@ class _NullSerial:
     ready = True
     port = "(없음)"
 
-    def update_state(self, state, extend_sec=None, now=None):
+    def update_state(self, state, zone=None, now=None):
         return None
 
-    def send_state(self, state, extend_sec=None, now=None):
+    def send_state(self, state, zone=None, now=None):
         return None
 
     def poll(self):
@@ -137,9 +137,9 @@ class _Reporter:
 
 
 def _describe(state, extend_sec, result_line):
-    mark = {"FALL": "!! FALL !!", "EXTEND": "EXTEND", "NORMAL": "정상"}.get(state, state)
-    if state == "EXTEND":
-        mark = f"EXTEND {extend_sec}s 필요"
+    mark = {"FALL": "!! FALL !!", "NORMAL": "정상"}.get(state, state)
+    if state == "ZONE":
+        mark = f"ZONE {extend_sec} (진척도)"
     return f"{mark}{result_line}"
 
 
@@ -179,7 +179,6 @@ def run_full_mode(args):
     from src.detection import PersonDetector
     from src.pipeline import CombinedPipeline, SignalExtensionPipeline, _NoSend
 
-    from src.signal_extend import ZoneExtensionRule
     from src.speed import SpeedEstimator
     from src.zone import CrosswalkOccupancy
 
@@ -196,7 +195,6 @@ def run_full_mode(args):
     extension = SignalExtensionPipeline(
         camera=camera, detector=detector, zones=zones,
         occupancy=CrosswalkOccupancy(zones, confirm_frames=args.confirm_frames),
-        rule=ZoneExtensionRule(),
         serial_comm=_NoSend(),
         speed_estimator=SpeedEstimator(ground_plane=zones.ground_plane),
     )
@@ -208,8 +206,7 @@ def run_full_mode(args):
         zones=zones,
     )
     print(f"[안내] 카메라 백엔드: {pipeline.camera.backend_name} (source={args.source!r})")
-    print(f"[안내] 속도 단위: {pipeline.extension.speed.unit}"
-          + ("  (ETA 전송 켜짐)" if config.USE_SPEED_FOR_EXTENSION else "  (ETA 전송 꺼짐)"))
+    print(f"[안내] 속도 단위: {pipeline.extension.speed.unit}  (계측용 — 연장 판단에는 쓰지 않음)")
     print("[안내] 종료: " + ("창에서 q" if args.display else "Ctrl+C") + "\n")
 
     reporter = _Reporter(args.display)
@@ -220,12 +217,12 @@ def run_full_mode(args):
         if ext.occupied_zones:
             extra += f" zone={ext.occupied_zones}"
         if ext.eta_sec is not None:
-            extra += f" ETA={ext.eta_sec:.1f}s"
+            extra += f" ETA={ext.eta_sec:.1f}s"   # 계측용 — 전송하지 않는다
         if result.line_sent:
             extra += f"  -> {result.line_sent}"
         text = (f"사람 {len(ext.pedestrians)}명 | "
-                + _describe(result.state, result.extend_sec, extra))
-        reporter.tick((result.state, result.extend_sec), text)
+                + _describe(result.state, result.zone, extra))
+        reporter.tick((result.state, result.zone), text)
         if args.display:
             return _draw(frame, text, result.fall.fall_confirmed, pipeline)
         return True

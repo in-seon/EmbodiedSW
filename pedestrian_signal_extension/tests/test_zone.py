@@ -4,7 +4,7 @@ import pytest
 
 from config import config
 from src.ground_plane import GroundPlane
-from src.zone import CrosswalkOccupancy, CrosswalkZones, Zone
+from src.zone import CrossingProgress, CrosswalkOccupancy, CrosswalkZones, Zone
 
 SQUARE = [(0, 0), (10, 0), (10, 10), (0, 10)]
 
@@ -324,3 +324,91 @@ def test_untracked_detection_does_not_disturb_tracked_one():
 
     occ.update([("p1", (25, 5)), (None, (25, 5))])
     assert occ.update([("p1", (25, 5)), (None, (25, 5))]) == {"p1": 3}
+
+
+# --- 진척도 (CrossingProgress) ---
+#
+# 물리 구역 번호는 좌표계 기준이라 진입 방향에 따라 의미가 뒤집힌다.
+# 반대편에서 들어온 사람의 '2번'은 '거의 다 건넜음'인데, 보정하지 않으면
+# '대부분 남았음'으로 읽혀 엉뚱한 사람이 최솟값을 차지한다.
+
+def test_progress_matches_zone_for_forward_entry():
+    """1·2번에서 처음 보이면 정방향 — 진척도가 구역 번호와 같다."""
+    p = CrossingProgress(zone_count=5)
+    assert p.update("a", 1) == 1
+    assert p.update("a", 2) == 2
+    assert p.update("a", 4) == 4
+    assert p.direction("a") == 1
+
+
+def test_progress_is_mirrored_for_reverse_entry():
+    """4·5번에서 처음 보이면 역방향 — 진척도가 뒤집힌다."""
+    p = CrossingProgress(zone_count=5)
+    assert p.update("b", 5) == 1        # 방금 진입
+    assert p.update("b", 4) == 2
+    assert p.update("b", 2) == 4        # 거의 다 건넜음
+    assert p.direction("b") == -1
+
+
+def test_opposite_directions_at_same_physical_zone():
+    """같은 물리 2번 구역이라도 방향이 다르면 진척도가 다르다 — 이 클래스의 존재 이유."""
+    p = CrossingProgress(zone_count=5)
+    p.update("fwd", 1)                  # 정방향으로 진입
+    p.update("rev", 5)                  # 역방향으로 진입
+
+    assert p.update("fwd", 2) == 2      # 대부분 남음
+    assert p.update("rev", 2) == 4      # 거의 다 건넘
+
+
+def test_middle_start_is_treated_as_middle():
+    """중앙에서 처음 보이면 방향을 모른다 -> 중앙값으로 간주한다."""
+    p = CrossingProgress(zone_count=5)
+    assert p.update("c", 3) == 3
+    assert p.direction("c") is None
+
+
+def test_middle_start_resolves_on_first_move():
+    """중앙에서 시작한 뒤 움직이면 그 방향으로 확정된다.
+
+    3->4든 3->2든 '중앙에서 한 칸 더 갔다'로 수렴해 진척도 4가 된다.
+    """
+    forward = CrossingProgress(zone_count=5)
+    forward.update("d", 3)
+    assert forward.update("d", 4) == 4
+    assert forward.direction("d") == 1
+
+    reverse = CrossingProgress(zone_count=5)
+    reverse.update("e", 3)
+    assert reverse.update("e", 2) == 4      # 6 - 2
+    assert reverse.direction("e") == -1
+
+
+def test_direction_is_latched_not_recomputed():
+    """한 번 정해진 방향은 유지된다 — 검출 흔들림으로 뒤로 밀려도 뒤집히지 않는다."""
+    p = CrossingProgress(zone_count=5)
+    p.update("f", 1)
+    p.update("f", 3)
+    assert p.update("f", 2) == 2        # 잠깐 뒤로 밀려도 여전히 정방향
+    assert p.direction("f") == 1
+
+
+def test_forget_clears_direction():
+    """ID가 재사용될 때 옛 방향이 따라붙으면 안 된다."""
+    p = CrossingProgress(zone_count=5)
+    p.update("g", 5)
+    assert p.direction("g") == -1
+
+    p.forget("g")
+    assert p.direction("g") is None
+    assert p.update("g", 1) == 1        # 새 사람으로 다시 시작
+    assert p.direction("g") == 1
+
+
+def test_keep_only_drops_missing_tracks():
+    p = CrossingProgress(zone_count=5)
+    p.update("h", 1)
+    p.update("i", 5)
+
+    p.keep_only(["h"])
+    assert p.direction("h") == 1
+    assert p.direction("i") is None

@@ -7,11 +7,11 @@
     파이 -> 아두이노       아두이노 -> 파이
     ------------------    --------------------------
     NORMAL                READY   (부팅 완료)
-    EXTEND <초>           PONG    (PING에 대한 답)
+    ZONE <1..N>           PONG    (PING에 대한 답)
     FALL                  ERR <명령>  (모르는 명령)
     PING
 
-예: `NORMAL` / `EXTEND 7` / `FALL`
+예: `NORMAL` / `ZONE 2` / `FALL`
 
 ## 파이는 '무엇을 보았는가'만 보내고, '언제 적용할까'는 아두이노가 정한다
 
@@ -21,21 +21,23 @@
 "남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 쪽만 답할 수 있고, "이 사람이 몇 번
 구역에 있나"는 영상을 보는 쪽만 답할 수 있다. 각자 자기만 아는 것을 판단하도록 나눴다.
 
-## EXTEND 뒤의 숫자는 "연장할 초"가 아니라 "필요한 시간"이다
+## ZONE 뒤의 숫자는 '진척도'다 — 물리 구역 번호가 아니다
 
-    부족분 = 필요시간 x ETA_SAFETY_MARGIN - 잔여시간      <- 아두이노가 계산
-    연장   = min(부족분, 1회 상한, 남은 예산)
+확정 보행자 중 **가장 덜 건넌 사람**의 진척도(1..N)를 보낸다.
 
-파이는 잔여 시간을 모르므로 뺄셈을 할 수 없다. 뺄셈이 아두이노에서 일어나려면 보내는
-값이 '연장량'이 아니라 '필요 시간'이어야 한다.
+    1 = 방금 진입          N = 거의 다 건넜음
 
-그 값은 파이가 이렇게 정한다(src/signal_extend.py):
+물리 구역 번호를 그대로 보내지 않는 이유: 구역 번호는 좌표계 기준이라 진입 방향에 따라
+의미가 뒤집힌다. 물리적으로 같은 2번이라도 한쪽에서 온 사람은 대부분 남았고 반대쪽에서
+온 사람은 거의 다 건넜다. 파이가 track별 진입 방향을 보정해 보낸다(src/zone.py).
 
-    ETA가 있으면  -> 실측 속도로 계산한 예상 통과 시간
-    없으면        -> 구역값 (FPS가 낮거나 사람이 멈춰 있으면 자주 이 경로)
+아두이노는 이 숫자로 이렇게 판단한다:
 
-**1회 연장 상한은 아두이노가 상수로 갖는다.** ETA가 이상하게 크게 나와도 한 번에
-예산을 다 쓰지 않도록 하는 안전장치다 — docs/team_interface.md 참고.
+    기준[n] = 기본녹색 x (1 - (2n-1)/(2N))     # 10초/5구역 -> 9,7,5,3,1
+    if (잔여시간 < 기준[n]) 조금 연장           # 뒤처졌다
+
+**기준표가 정상 보행 속도를 담고 있어서** 파이가 속도를 잴 필요가 없다. 느린 사람은
+기준 대비 지연이 크게 잡혀 자동으로 더 연장받으므로 교통약자 검출도 필요 없다.
 
 ## 전송 정책
 
@@ -64,7 +66,7 @@ _ARDUINO_VIDS = (0x2341, 0x2A03, 0x1A86, 0x0403)
 # 파이가 보낼 수 있는 상태. 문자열을 여기 모아 두어 오타로 조용히 어긋나지 않게 한다.
 # 우선순위: FALL > EXTEND > NORMAL (쓰러진 사람이 있으면 연장 요구보다 그쪽이 급하다).
 STATE_NORMAL = "NORMAL"
-STATE_EXTEND = "EXTEND"
+STATE_ZONE = "ZONE"
 STATE_FALL = "FALL"
 
 
@@ -285,23 +287,23 @@ class SerialComm:
         return self.ready
 
     @staticmethod
-    def format_state(state: str, extend_sec=None) -> str:
+    def format_state(state: str, zone=None) -> str:
         """보낼 한 줄을 만든다. 전송과 분리해 둔 이유는 테스트·도구가 그대로 쓰기 위함이다.
 
             NORMAL
-            EXTEND 7
+            ZONE 2
             FALL
 
-        EXTEND 뒤의 숫자는 **"앞으로 필요한 시간(초)"**이지 "연장할 초"가 아니다.
-        아두이노가 잔여 시간을 빼서 실제 연장량을 낸다 — src/signal_extend.py 참고.
+        ZONE 뒤의 숫자는 **진척도**(1 = 방금 진입, N = 거의 다 건넜음)이지 물리 구역
+        번호가 아니다 — 모듈 docstring 참고.
         """
-        if state != STATE_EXTEND:
+        if state != STATE_ZONE:
             return state
-        if extend_sec is None:
-            raise ValueError("EXTEND 상태에는 필요 시간(초)이 필요합니다.")
-        return f"{STATE_EXTEND} {int(extend_sec)}"
+        if zone is None:
+            raise ValueError("ZONE 상태에는 진척도가 필요합니다.")
+        return f"{STATE_ZONE} {int(zone)}"
 
-    def send_state(self, state: str, extend_sec=None, now=None) -> str:
+    def send_state(self, state: str, zone=None, now=None) -> str:
         """상태를 **무조건** 한 줄 보낸다 (수동 조작·진단용).
 
         평상시 루프에서는 update_state()를 쓸 것 — 그쪽이 변화 감지와 하트비트를 한다.
@@ -309,13 +311,13 @@ class SerialComm:
         now를 받는 이유: 하트비트 시각을 여기서 찍는데, 호출자가 쓰는 시계와 다르면
         주기가 어긋난다. 테스트에서 시각을 주입할 수 있어야 하는 이유이기도 하다.
         """
-        line = self.format_state(state, extend_sec)
+        line = self.format_state(state, zone)
         self._send(line)
-        self._last_state_key = (state, extend_sec)
+        self._last_state_key = (state, zone)
         self._last_state_sent = time.monotonic() if now is None else now
         return line
 
-    def update_state(self, state: str, extend_sec=None, now=None):
+    def update_state(self, state: str, zone=None, now=None):
         """상태를 반영한다. 매 프레임 호출하는 것을 전제로 한다.
 
         전송 규칙 — **상태가 바뀔 때 즉시, 그리고 heartbeat_sec마다 한 번 더.**
@@ -337,11 +339,11 @@ class SerialComm:
         now = time.monotonic() if now is None else now
         self.poll()
 
-        key = (state, extend_sec)
+        key = (state, zone)
         if key != self._last_state_key:
-            return self.send_state(state, extend_sec, now=now)
+            return self.send_state(state, zone, now=now)
         if now - self._last_state_sent >= self.heartbeat_sec:
-            return self.send_state(state, extend_sec, now=now)
+            return self.send_state(state, zone, now=now)
         return None
 
     @property

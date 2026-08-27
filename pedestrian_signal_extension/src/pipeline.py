@@ -11,10 +11,10 @@
     프레임
       -> PersonDetector.detect()            yolov8n-pose, track_id + 키포인트
       ├-> box.foot_point() -> CrosswalkZones.locate() -> CrosswalkOccupancy
-      │       -> ZoneExtensionRule.required_sec()   구역 -> 필요한 연장 초
+      │       -> CrossingProgress -> minimum_progress()  가장 덜 건넌 사람
       ├-> SpeedEstimator.update_many()      평면 좌표 변화율 -> 속도/ETA
       └-> FallDetectionPipeline.update()    키포인트 -> 몸통 각도 -> 쓰러짐 확정
-      -> SerialComm.update_state()          NORMAL / EXTEND <초> <ETA|-> / FALL
+      -> SerialComm.update_state()          NORMAL / ZONE <진척도> / FALL
 
 ## '언제 연장할까'는 여기 없다
 
@@ -37,10 +37,10 @@ from src.capture import CameraCapture
 from src.detection import MobilityAidDetector, PersonDetector
 from src.fall_detection import FallDetectionPipeline, roi_from_ratio, roi_from_zones
 from src.serial_comm import SerialComm
-from src.serial_comm import STATE_EXTEND, STATE_FALL, STATE_NORMAL
-from src.signal_extend import Occupant, ZoneExtensionRule
+from src.serial_comm import STATE_FALL, STATE_NORMAL, STATE_ZONE
+from src.signal_extend import Occupant, maximum_eta_sec, minimum_progress
 from src.speed import SpeedEstimator
-from src.zone import CrosswalkOccupancy, CrosswalkZones
+from src.zone import CrosswalkOccupancy, CrossingProgress, CrosswalkZones
 
 
 @dataclass
@@ -49,7 +49,9 @@ class PedestrianState:
 
     track_id: object
     foot_point: tuple
-    zone: object = None              # 1..N 또는 None(횡단보도 밖)
+    zone: object = None              # 물리 구역 1..N 또는 None(횡단보도 밖)
+    progress: object = None          # 진입 방향으로 보정한 진척도 1..N
+    direction: object = None         # +1 / -1 / None(미정)
     confirmed: bool = False          # ZONE_RESIDENCY_FRAMES를 채워 '확정 보행자'가 됐는지
     speed: object = None             # TrackSpeed 또는 None(아직 샘플 부족)
     crossing_time_sec: object = None # 예상 통과 시간(초) 또는 None
@@ -59,9 +61,10 @@ class PedestrianState:
 class FrameResult:
     """process_frame 한 번의 결과."""
 
-    extension_sec: int = 0
-    # 실측 ETA (화면 표시·진단용, 전송하지 않는다). None이면 extension_sec이 구역값으로
-    # 폴백된 것이다 — FPS가 낮거나 사람이 멈춰 있으면 그렇게 된다.
+    # 확정 보행자 중 **가장 덜 건넌 사람의 진척도**(1..N). 아무도 없으면 None.
+    # 물리 구역 번호가 아니라 진입 방향으로 보정된 값이다 — src/zone.py CrossingProgress 참고.
+    progress: object = None
+    # 실측 ETA (화면 표시·진단용, **전송하지 않는다**). 연장 판단은 ETA 없이 돌아간다.
     eta_sec: object = None
     occupied_zones: list = field(default_factory=list)
     pedestrians: list = field(default_factory=list)  # PedestrianState 목록
@@ -76,20 +79,20 @@ class FrameResult:
     mobility_aid_count: int = 0
 
     def serial_state(self):
-        """이 결과를 아두이노로 보낼 (상태, 연장초)로 요약한다.
+        """이 결과를 아두이노로 보낼 (상태, 진척도)로 요약한다.
 
-        연장이 필요 없으면(아무도 없거나 양 끝 구역만) NORMAL이다. 쓰러짐은 이 결과에
-        들어 있지 않으므로 여기서 판단하지 않는다 — CombinedPipeline이 FALL을 덮어쓴다.
+        확정 보행자가 없으면 NORMAL이다. 쓰러짐은 이 결과에 들어 있지 않으므로 여기서
+        판단하지 않는다 — CombinedPipeline이 FALL로 덮어쓴다.
         """
-        if self.extension_sec > 0:
-            return STATE_EXTEND, self.extension_sec
+        if self.progress is not None:
+            return STATE_ZONE, self.progress
         return STATE_NORMAL, None
 
 
 class SignalExtensionPipeline:
     def __init__(self, camera=None, detector=None, zones=None, occupancy=None,
-                 rule=None, serial_comm=None, speed_estimator=None,
-                 aid_detector=None):
+                 serial_comm=None, speed_estimator=None, aid_detector=None,
+                 progress=None):
         # 인자로 주입하지 않으면 config 기반 기본 객체를 만든다(테스트에선 가짜 객체 주입 가능).
         self.camera = camera or CameraCapture()
         self.detector = detector or PersonDetector()
@@ -99,7 +102,8 @@ class SignalExtensionPipeline:
         self.aid_detector = aid_detector if aid_detector is not None else MobilityAidDetector()
         self.zones = zones or CrosswalkZones.load()
         self.occupancy = occupancy or CrosswalkOccupancy(self.zones)
-        self.rule = rule or ZoneExtensionRule()
+        # track별 진입 방향을 래치해 물리 구역을 '진척도'로 바꾼다.
+        self.progress = progress or CrossingProgress(zone_count=len(self.zones))
         self.serial_comm = serial_comm or SerialComm()
         # 호모그래피는 zone 설정에서 함께 만들어진다. 실측 치수가 없으면 None -> 속도가 px/s로 나온다.
         self.speed = speed_estimator or SpeedEstimator(ground_plane=self.zones.ground_plane)
@@ -129,19 +133,29 @@ class SignalExtensionPipeline:
             for box in boxes
             if box.is_pedestrian()
         ]
-        # 교통약자 보조기구가 하나라도 보이면 우선 연장 모드.
-        # 이 구조에서 '우선'은 **보내는 숫자가 커지는 것**일 뿐이고 프로토콜은 그대로다.
+        # 교통약자 보조기구 검출 결과. **연장 판단에는 쓰지 않는다.**
+        # 기준표 방식에서는 느린 사람이 기준 대비 지연으로 자동 검출되어 더 연장받으므로,
+        # "휠체어인가"를 따로 알 필요가 없다. 이 값은 화면 표시·발표 자료용 계측이다.
         priority_mode = bool(aid_boxes)
 
         confirmed = self.occupancy.update(detections)
         occupied = self.occupancy.occupied_zones()
         speeds = self.speed.update_many(detections, timestamp)
 
+        # 물리 구역 -> 진척도. 확정 보행자만 진척도를 갱신한다(잔류 확정 전에는 방향을
+        # 래치하지 않는다 — 스쳐가는 오검출로 방향이 잘못 굳는 것을 막는다).
+        progresses = {}
+        for track_id, zone in confirmed.items():
+            progresses[track_id] = self.progress.update(track_id, zone)
+        self.progress.keep_only(confirmed.keys())
+
         pedestrians = [
             PedestrianState(
                 track_id=track_id,
                 foot_point=foot_point,
                 zone=self.zones.locate(foot_point),
+                progress=progresses.get(track_id),
+                direction=self.progress.direction(track_id),
                 confirmed=track_id in confirmed,
                 speed=speeds.get(track_id),
                 crossing_time_sec=self.speed.estimated_crossing_time_sec(track_id),
@@ -149,21 +163,19 @@ class SignalExtensionPipeline:
             for track_id, foot_point in detections
         ]
 
-        # 확정 보행자마다 (구역, 예상 통과 시간)을 실어 규칙에 넘긴다.
+        # 진척도와 (계측용) ETA를 실어 보낸다.
         occupants = [
-            Occupant(zone=zone, eta_sec=self.speed.estimated_crossing_time_sec(track_id))
-            for track_id, zone in confirmed.items()
+            Occupant(progress=value,
+                     eta_sec=self.speed.estimated_crossing_time_sec(track_id))
+            for track_id, value in progresses.items()
         ]
 
-        # 보내는 값은 '연장할 초'가 아니라 '앞으로 필요한 시간'이다.
-        # ETA가 있으면 그 값이, 없으면 구역값이 들어간다(src/signal_extend.py).
-        extension_sec = self.rule.required_sec(occupants, priority_mode=priority_mode)
-        # 아래는 전송이 아니라 **화면 표시용**이다. ETA가 실제로 나오고 있는지 눈으로
-        # 확인하기 위한 것 — 계속 None이면 구역값으로 폴백되고 있다는 뜻이다.
-        eta_sec = self.rule.max_eta_sec(occupants)
+        # 파이는 '가장 덜 건넌 사람'만 알려준다. 얼마나 연장할지는 아두이노가 정한다.
+        progress_zone = minimum_progress(occupants)
+        eta_sec = maximum_eta_sec(occupants)     # 표시·진단용, 전송하지 않는다
 
         return FrameResult(
-            extension_sec=extension_sec,
+            progress=progress_zone,
             eta_sec=eta_sec,
             occupied_zones=occupied,
             pedestrians=pedestrians,
@@ -178,8 +190,8 @@ class SignalExtensionPipeline:
         with self.camera, self.serial_comm:
             for frame in self.camera.frames():
                 result = self.process_frame(frame)
-                state, extend = result.serial_state()
-                self.serial_comm.update_state(state, extend)
+                state, zone = result.serial_state()
+                self.serial_comm.update_state(state, zone)
                 if on_result is not None and on_result(result, frame) is False:
                     break
 
@@ -296,7 +308,7 @@ class CombinedResult:
     fall: FallAlarmResult = field(default_factory=FallAlarmResult)
     extension: FrameResult = field(default_factory=FrameResult)
     state: str = STATE_NORMAL          # 실제로 아두이노에 반영된 상태
-    extend_sec: object = None
+    zone: object = None                # ZONE 상태일 때의 진척도
     line_sent: object = None           # 이번 프레임에 보낸 줄, 안 보냈으면 None
 
 
@@ -348,14 +360,14 @@ class CombinedPipeline:
         ext_result = self.extension.process_boxes(boxes, aid_boxes, now)
 
         if fall_result.fall_confirmed:
-            state, extend = STATE_FALL, None
+            state, zone = STATE_FALL, None
         else:
-            state, extend = ext_result.serial_state()
+            state, zone = ext_result.serial_state()
 
-        line = self.serial_comm.update_state(state, extend, now=now)
+        line = self.serial_comm.update_state(state, zone, now=now)
         return CombinedResult(
             fall=fall_result, extension=ext_result,
-            state=state, extend_sec=extend, line_sent=line,
+            state=state, zone=zone, line_sent=line,
         )
 
     def reset_alarm(self):

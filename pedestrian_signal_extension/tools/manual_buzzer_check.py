@@ -21,7 +21,7 @@
 
 ## ⚠️ 상태 메시지에는 응답이 오지 않는 것이 정상이다
 
-프로토콜상 `NORMAL`/`EXTEND`/`FALL`에는 아두이노가 답하지 않는다. 응답 송신 시간이
+프로토콜상 `NORMAL`/`ZONE`/`FALL`에는 아두이노가 답하지 않는다. 응답 송신 시간이
 아두이노 루프를 묶기 때문이다(docs/team_interface.md). **연결 확인은 `PING`/`PONG`으로만**
 한다. 상태를 보낸 뒤 아무 줄도 안 오는 것은 고장이 아니다 — 부저가 우는지 귀로 본다.
 """
@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config
-from src.serial_comm import STATE_EXTEND, STATE_FALL, STATE_NORMAL, SerialComm
+from src.serial_comm import STATE_FALL, STATE_NORMAL, STATE_ZONE, SerialComm
 
 
 def print_ports():
@@ -103,9 +103,9 @@ def run_watchdog(comm):
 
 
 def run_interactive(comm):
-    print("명령: a=FALL  s=NORMAL  e=EXTEND 5  3=EXTEND 3  p=PING  q=종료")
+    print("명령: a=FALL  s=NORMAL  1/3/5=ZONE n  p=PING  q=종료")
     print()
-    print("  * 상태 메시지(a/s/e)에는 응답이 없는 것이 정상입니다. 부저는 귀로 확인하세요.")
+    print("  * 상태 메시지(a/s/1/3/5)에는 응답이 없는 것이 정상입니다. 부저는 귀로 확인하세요.")
     print("  * 연결이 의심되면 p(PING)로 확인하세요 — PONG이 와야 정상입니다.")
     print("  * PONG은 오는데 부저가 안 울린다면 통신은 정상이고 부저/배선 문제입니다.")
     print("    (arduino/buzzer_only_test/ 스케치로 부저만 따로 확인할 수 있습니다)")
@@ -125,17 +125,20 @@ def run_interactive(comm):
         elif key == "s":
             comm.send_state(STATE_NORMAL)
             print("    -> NORMAL")
-        elif key == "e":
-            comm.send_state(STATE_EXTEND, 5, eta_sec=7.2)
-            print("    -> EXTEND 5 7.2")
+        elif key == "1":
+            comm.send_state(STATE_ZONE, 1)
+            print("    -> ZONE 1  (방금 진입 — 가장 많이 남음)")
         elif key == "3":
-            comm.send_state(STATE_EXTEND, 3)
-            print("    -> EXTEND 3 -")
+            comm.send_state(STATE_ZONE, 3)
+            print("    -> ZONE 3  (정중앙)")
+        elif key == "5":
+            comm.send_state(STATE_ZONE, 5)
+            print("    -> ZONE 5  (거의 다 건넘)")
         elif key == "p":
             comm.ping()
             print("    -> PING")
         else:
-            print("    a / s / e / 3 / p / q 중에서 입력하세요.")
+            print("    a / s / 1 / 3 / 5 / p / q 중에서 입력하세요.")
             continue
 
         # 응답을 기다렸다가 보여준다. 아두이노 왕복은 보통 수 ms지만 넉넉히 준다.

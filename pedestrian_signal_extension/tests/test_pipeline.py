@@ -16,8 +16,7 @@ from config import config
 from src.detection import BoundingBox
 from src.ground_plane import GroundPlane
 from src.pipeline import CombinedPipeline, SignalExtensionPipeline
-from src.serial_comm import STATE_EXTEND, STATE_FALL, STATE_NORMAL
-from src.signal_extend import ZoneExtensionRule
+from src.serial_comm import STATE_FALL, STATE_NORMAL, STATE_ZONE
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
 
@@ -58,12 +57,12 @@ class FakeSerial:
     def __init__(self):
         self.states = []
 
-    def update_state(self, state, extend_sec=None, now=None):
-        self.states.append((state, extend_sec))
+    def update_state(self, state, zone=None, now=None):
+        self.states.append((state, zone))
         return state
 
-    def send_state(self, state, extend_sec=None, now=None):
-        self.states.append((state, extend_sec))
+    def send_state(self, state, zone=None, now=None):
+        self.states.append((state, zone))
         return state
 
 
@@ -91,7 +90,7 @@ def aid_box(label="wheelchair"):
 
 
 def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH_CM,
-                   aid_frames=None, priority_zones=None):
+                   aid_frames=None):
     zones = CrosswalkZones.from_quad(CORNERS, n=5, width_cm=width_cm, length_cm=length_cm)
     plane = GroundPlane.from_quad(CORNERS, width_cm, length_cm)
     return SignalExtensionPipeline(
@@ -100,8 +99,6 @@ def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH
         aid_detector=FakeAidDetector(aid_frames),
         zones=zones,
         occupancy=CrosswalkOccupancy(zones, confirm_frames=confirm_frames),
-        rule=ZoneExtensionRule(zone_extension_sec=ZONE_EXT,
-                               priority_zone_extension_sec=priority_zones),
         serial_comm=FakeSerial(),
         speed_estimator=SpeedEstimator(ground_plane=plane, window_sec=10.0),
     )
@@ -123,133 +120,130 @@ def test_uses_foot_point_not_center_for_zone():
     result = pipeline.process_frame(frame=None, timestamp=0.0)
 
     assert result.pedestrians[0].zone == 3
-    assert result.extension_sec == 5          # 2번(3초)이 아니라 3번(5초)
 
 
-# --- 구역 -> 연장 요구 ---
+# --- 진척도 (진입 방향 보정) ---
 
-@pytest.mark.parametrize("foot_y,zone,expected_sec", [
-    (10, 1, 0), (50, 2, 3), (100, 3, 5), (150, 4, 3), (190, 5, 0),
-])
-def test_zone_maps_to_extension(foot_y, zone, expected_sec):
+@pytest.mark.parametrize("foot_y,zone", [(10, 1), (50, 2), (100, 3), (150, 4), (190, 5)])
+def test_physical_zone_is_reported(foot_y, zone):
     pipeline = build_pipeline([[box_at(50, foot_y, track_id=1)]])
     result = pipeline.process_frame(None, timestamp=0.0)
     assert result.pedestrians[0].zone == zone
-    assert result.extension_sec == expected_sec
+
+
+def test_forward_entry_progress_equals_zone():
+    """1번에서 진입하면 진척도가 구역 번호와 같다."""
+    frames = [[box_at(50, 10, 1)], [box_at(50, 100, 1)]]
+    pipeline = build_pipeline(frames)
+    pipeline.process_frame(None, timestamp=0.0)
+    result = pipeline.process_frame(None, timestamp=1.0)
+    assert result.progress == 3
+    assert result.serial_state() == (STATE_ZONE, 3)
+
+
+def test_reverse_entry_progress_is_mirrored():
+    """5번에서 진입하면 진척도가 뒤집힌다 — 물리 2번이 진척도 4가 된다."""
+    frames = [[box_at(50, 190, 1)], [box_at(50, 50, 1)]]
+    pipeline = build_pipeline(frames)
+    pipeline.process_frame(None, timestamp=0.0)
+    result = pipeline.process_frame(None, timestamp=1.0)
+    assert result.pedestrians[0].zone == 2      # 물리 구역
+    assert result.progress == 4                  # 거의 다 건넜음
+    assert result.serial_state() == (STATE_ZONE, 4)
+
+
+def test_opposite_directions_send_the_least_advanced():
+    """반대 방향 두 사람이 같은 물리 구역에 있어도, 덜 건넌 쪽이 선택된다.
+
+    보정하지 않으면 둘 다 '2번'이라 구분되지 않는다 — 이 파이프라인의 핵심 요구사항.
+    """
+    enter = [box_at(50, 10, 1), box_at(60, 190, 2)]      # 1번 진입 / 5번 진입
+    both_at_zone2 = [box_at(50, 50, 1), box_at(60, 50, 2)]
+    pipeline = build_pipeline([enter, both_at_zone2])
+
+    pipeline.process_frame(None, timestamp=0.0)
+    result = pipeline.process_frame(None, timestamp=1.0)
+
+    zones = {p.track_id: p.zone for p in result.pedestrians}
+    progress = {p.track_id: p.progress for p in result.pedestrians}
+    assert zones == {1: 2, 2: 2}                 # 물리적으로 같은 구역
+    assert progress == {1: 2, 2: 4}              # 진척도는 다르다
+    assert result.progress == 2                  # 덜 건넌 1번 기준
+
+
+def test_middle_start_is_treated_as_middle():
+    """중앙에서 처음 보이면 방향을 모른다 -> 중앙값(3)으로 간주."""
+    pipeline = build_pipeline([[box_at(50, 100, 1)]])
+    result = pipeline.process_frame(None, timestamp=0.0)
+    assert result.progress == 3
+    assert result.pedestrians[0].direction is None
+
+
+# --- 아무도 없을 때 ---
+
+def test_no_one_means_normal():
+    pipeline = build_pipeline([[]])
+    result = pipeline.process_frame(None, timestamp=0.0)
+    assert result.progress is None
+    assert result.serial_state() == (STATE_NORMAL, None)
 
 
 def test_outside_crosswalk_is_not_counted():
     pipeline = build_pipeline([[box_at(500, 500, track_id=1)]])
     result = pipeline.process_frame(None, timestamp=0.0)
-    assert result.extension_sec == 0
+    assert result.progress is None
     assert result.occupied_zones == []
 
 
 def test_residency_gate_blocks_until_confirmed():
-    """잔류 프레임 수를 못 채운 검출은 연장 요구를 만들지 않는다."""
+    """잔류 프레임 수를 못 채운 검출은 진척도를 만들지 않는다.
+
+    방향 래치도 확정 후에만 걸린다 — 스쳐가는 오검출로 방향이 잘못 굳는 것을 막는다.
+    """
     frames = [[box_at(50, 100, track_id=1)]] * 3
     pipeline = build_pipeline(frames, confirm_frames=3)
 
-    assert pipeline.process_frame(None, timestamp=0.0).extension_sec == 0
-    assert pipeline.process_frame(None, timestamp=0.1).extension_sec == 0
-    assert pipeline.process_frame(None, timestamp=0.2).extension_sec == 5
+    assert pipeline.process_frame(None, timestamp=0.0).progress is None
+    assert pipeline.process_frame(None, timestamp=0.1).progress is None
+    assert pipeline.process_frame(None, timestamp=0.2).progress == 3
 
 
-def test_takes_largest_need_among_people():
-    boxes = [box_at(50, 50, 1), box_at(60, 100, 2), box_at(70, 10, 3)]
-    pipeline = build_pipeline([boxes])
-    result = pipeline.process_frame(None, timestamp=0.0)
-    assert sorted(result.occupied_zones) == [1, 2, 3]
-    assert result.extension_sec == 5
+# --- 속도는 연장 판단에 쓰이지 않는다 ---
 
-
-# --- 상태 요약 (아두이노로 나가는 형태) ---
-
-def test_serial_state_is_normal_without_need():
-    pipeline = build_pipeline([[box_at(50, 10, track_id=1)]])   # 1번 구역 -> 0초
-    result = pipeline.process_frame(None, timestamp=0.0)
-    assert result.serial_state() == (STATE_NORMAL, None)
-
-
-def test_serial_state_carries_extension():
-    pipeline = build_pipeline([[box_at(50, 100, track_id=1)]])
-    result = pipeline.process_frame(None, timestamp=0.0)
-    assert result.serial_state() == (STATE_EXTEND, 5)
-
-
-# --- 보내는 값: ETA 있으면 ETA, 없으면 구역값 ---
-
-def test_uses_zone_value_when_flag_off(monkeypatch):
-    """플래그가 꺼져 있으면 걷고 있어도 구역값을 쓴다 (속도 검증 전까지의 안전한 동작)."""
-    monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", False)
-    frames = [[box_at(50, 100, 1)], [box_at(50, 120, 1)]]
+def test_eta_is_measured_but_does_not_change_the_sent_value():
+    """ETA는 계측용이다. 있든 없든 보내는 진척도는 같아야 한다."""
+    frames = [[box_at(50, 10, 1)], [box_at(50, 100, 1)]]
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
     result = pipeline.process_frame(None, timestamp=1.0)
-    assert result.extension_sec == 5              # 3번 구역값
-    assert result.eta_sec is not None             # 계산은 되고 있다(표시용)
+
+    assert result.eta_sec is not None          # 계측은 되고 있다
+    assert result.progress == 3                 # 값은 구역만으로 정해진다
 
 
-def test_uses_eta_when_flag_on(monkeypatch):
-    """걷고 있는 사람이 있으면 보내는 값이 ETA가 된다."""
-    monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", True)
-    # 1초에 20px(=10cm) 이동. 3번 구역(y=120)에서 끝(200px=100cm)까지 40cm 남음 -> ETA 4초
-    frames = [[box_at(50, 100, 1)], [box_at(50, 120, 1)]]
-    pipeline = build_pipeline(frames)
-    pipeline.process_frame(None, timestamp=0.0)
-    result = pipeline.process_frame(None, timestamp=1.0)
-    assert result.eta_sec is not None
-    assert result.extension_sec == int(__import__("math").ceil(result.eta_sec))
+def test_standing_person_still_reports_progress():
+    """서 있는 사람은 ETA가 없지만 진척도는 나온다 — 연장 판단이 속도에 의존하지 않는다.
 
-
-def test_falls_back_to_zone_when_standing(monkeypatch):
-    """서 있는 사람은 ETA가 없다 -> 구역값으로 폴백한다.
-
-    가운데 서 있는 사람이야말로 연장이 가장 필요하므로, 여기서 0을 보내면 안 된다.
+    예전 방식에서는 여기서 ETA가 None이라 폴백이 필요했다. 지금은 폴백 자체가 없다.
     """
-    monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", True)
     frames = [[box_at(50, 100, 1)]] * 3
     pipeline = build_pipeline(frames)
     for t in (0.0, 1.0, 2.0):
         result = pipeline.process_frame(None, timestamp=t)
     assert result.eta_sec is None
-    assert result.extension_sec == 5              # 구역값으로 폴백
+    assert result.progress == 3
 
 
-def test_end_zone_is_gated_even_with_eta(monkeypatch):
-    """양 끝 구역은 ETA가 아무리 커도 제외된다 — 구역은 게이트 역할을 유지한다."""
-    monkeypatch.setattr(config, "USE_SPEED_FOR_EXTENSION", True)
-    frames = [[box_at(50, 10, 1)], [box_at(50, 15, 1)]]     # 1번 구역
-    pipeline = build_pipeline(frames)
-    pipeline.process_frame(None, timestamp=0.0)
-    result = pipeline.process_frame(None, timestamp=1.0)
-    assert result.extension_sec == 0
-    assert result.serial_state() == (STATE_NORMAL, None)
+# --- 교통약자 검출은 계측용으로만 남는다 ---
 
-
-# --- 교통약자 우선 ---
-
-def test_priority_mode_follows_aid_detector():
+def test_mobility_aid_is_reported_but_does_not_change_output():
+    """느린 사람은 아두이노가 기준 대비 지연으로 잡는다 — 검출 결과로 값을 바꾸지 않는다."""
     pipeline = build_pipeline([[box_at(50, 100, 1)]], aid_frames=[[aid_box()]])
     result = pipeline.process_frame(None, timestamp=0.0)
+
     assert result.priority_mode is True
     assert result.mobility_aid_count == 1
-
-
-def test_priority_mode_off_without_aid_detection():
-    pipeline = build_pipeline([[box_at(50, 100, 1)]])
-    result = pipeline.process_frame(None, timestamp=0.0)
-    assert result.priority_mode is False
-    assert result.mobility_aid_count == 0
-
-
-def test_priority_only_changes_the_number():
-    """'우선'은 보내는 숫자가 커지는 것일 뿐, 프로토콜은 그대로다."""
-    priority_zones = {1: 0, 2: 4, 3: 6, 4: 4, 5: 0}
-    pipeline = build_pipeline([[box_at(50, 100, 1)]], aid_frames=[[aid_box()]],
-                              priority_zones=priority_zones)
-    result = pipeline.process_frame(None, timestamp=0.0)
-    assert result.serial_state() == (STATE_EXTEND, 6)
+    assert result.progress == 3                 # 값은 그대로
 
 
 # --- 추론 1회 공유 ---
@@ -257,17 +251,16 @@ def test_priority_only_changes_the_number():
 def test_process_boxes_does_not_call_detector():
     """CombinedPipeline이 쓰는 진입점 — 여기서 다시 검출하면 추론이 2배가 된다."""
     pipeline = build_pipeline([[box_at(50, 100, 1)]])
-    boxes = [box_at(50, 100, track_id=1)]
-    pipeline.process_boxes(boxes, timestamp=0.0)
+    pipeline.process_boxes([box_at(50, 100, track_id=1)], timestamp=0.0)
     assert pipeline.detector.calls == 0
 
 
 def test_untracked_detection_is_reported():
-    """track_id가 없으면 잔류·속도 판정에서 제외되고, 그 사실이 보여야 한다."""
+    """track_id가 없으면 잔류·진척도 판정에서 제외되고, 그 사실이 보여야 한다."""
     pipeline = build_pipeline([[box_at(50, 100, track_id=None)]])
     result = pipeline.process_frame(None, timestamp=0.0)
     assert result.untracked_count == 1
-    assert result.extension_sec == 0
+    assert result.progress is None
 
 
 # --- CombinedPipeline: 상태 우선순위 ---
@@ -301,24 +294,24 @@ def build_combined(fall_confirmed, boxes):
     return combined, serial
 
 
-def test_fall_wins_over_extend():
+def test_fall_wins_over_zone():
     """쓰러진 사람이 있으면 연장 요구보다 그쪽이 급하다."""
     combined, serial = build_combined(True, [box_at(50, 100, 1)])
     result = combined.process_frame(None, timestamp=0.0)
 
     assert result.state == STATE_FALL
-    assert result.extend_sec is None
+    assert result.zone is None
     assert serial.states[-1][0] == STATE_FALL
-    # 연장 계산 자체는 그대로 돌아가고 있다(쓰러짐이 풀리면 곧바로 이어진다).
-    assert result.extension.extension_sec == 5
+    # 구역 판정 자체는 그대로 돌아가고 있다(쓰러짐이 풀리면 곧바로 이어진다).
+    assert result.extension.progress == 3
 
 
-def test_extend_resumes_when_fall_clears():
+def test_zone_resumes_when_fall_clears():
     combined, serial = build_combined(False, [box_at(50, 100, 1)])
     result = combined.process_frame(None, timestamp=0.0)
 
-    assert result.state == STATE_EXTEND
-    assert result.extend_sec == 5
+    assert result.state == STATE_ZONE
+    assert result.zone == 3
 
 
 def test_combined_runs_inference_once_per_frame():
