@@ -5,6 +5,7 @@
 - `CLAUDE.md` — 프로젝트 배경과 설계 의도 (왜 이렇게 만드는가)
 - `docs/decisions.md` — 파라미터 값의 근거 (왜 이 숫자인가)
 - `docs/bugfix_log.md` — 무엇이 잘못됐고 어떻게 고쳤는가
+- `docs/log.md` — 무엇이 언제 왜 바뀌었는가 (시간순)
 - **이 문서** — 무엇이 어떤 순서로 실행되고 각 함수가 무엇을 받아 무엇을 내놓는가
 
 > 표기 규칙: `→` 반환값, `⚠️` 실패/예외 조건, `▸` 분기 조건.
@@ -43,14 +44,17 @@
         │                          → 속도/방향/ETA                  │
         └───────────┬───────────────────┘                           │
                     ▼                                               │
-            signal_extend.py                                        │
-            ZoneExtensionRule.required_sec([Occupant(구역, ETA)])     │
-            → 연장 초(int)                                          │
-                    │                                               │
-                    ▼                                               ▼
-            serial_comm.py                                  (미구현: 텔레그램 신고)
-            update_state(NORMAL | EXTEND <초> <ETA> | FALL)  docs/team_interface.md 참고
-            ▸ 변화 시 + 1초 하트비트에만 실제 전송
+   CrossingProgress                                                 │
+   (진입 방향 보정 → 진척도)                                          │
+        │                                                           │
+        ▼                                                           │
+   signal_extend.py                                                 │
+   minimum_progress()  → 가장 덜 건넌 사람                           │
+        │                                                           │
+        ▼                                                           ▼
+   serial_comm.py                                        (미구현: 텔레그램 신고)
+   update_state(NORMAL | ZONE <진척도> | FALL)            docs/team_interface.md 참고
+   ▸ 변화 시 + 1초 하트비트에만 실제 전송
 ```
 
 **핵심 구조 두 가지**
@@ -124,11 +128,13 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 
 | 파이 → 아두이노 | 언제 |
 |---|---|
-| `NORMAL` | 연장 요구 없음 (아무도 없거나 양 끝 구역만) |
-| `EXTEND <초> <ETA\|->` | 확정 보행자가 가운데 구역에 있음 |
+| `NORMAL` | 횡단보도에 확정 보행자가 없음 |
+| `ZONE <1..5>` | 가장 덜 건넌 사람의 **진척도**(1=방금 진입, 5=거의 다 건넘) |
 | `FALL` | 쓰러짐 확정 |
 
-전송은 **상태가 바뀔 때 + 1초 하트비트**. ETA는 변화 판정에서 제외한다(매 프레임 변하므로).
+전송은 **상태가 바뀔 때 + 1초 하트비트**. 아두이노는 구역별 '정상 도착 기준 잔여시간'과
+비교해 뒤처진 만큼 2초씩 연장한다 — 그 표가 정상 보행 속도를 담고 있어서 **파이가 속도를
+잴 필요가 없다.**
 
 ### 2.2 생성 순서와 실패 지점
 
@@ -157,9 +163,9 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
   ② boxes     = detector.detect(frame)                 [추론 1회 — 전체 시간의 99.6%]
      aid_boxes = aid_detector.detect(frame)            [N프레임마다 1회, 없으면 빈 목록]
   ③ fall = fall_pipeline.process_boxes(boxes, frame)   키포인트 → 몸통 각도 → 확정 여부
-  ④ ext  = ext_pipeline.process_boxes(boxes, aid_boxes) 발 위치 → 구역 → 필요한 연장 초
+  ④ ext  = ext_pipeline.process_boxes(boxes, aid_boxes) 발 위치 → 구역 → 진척도
   ⑤ state = FALL if fall.confirmed else ext.serial_state()
-  ⑥ serial_comm.update_state(state, 연장초, ETA)       ▸ 변화 시 + 1초마다만 실제 전송
+  ⑥ serial_comm.update_state(state, 진척도)            ▸ 변화 시 + 1초마다만 실제 전송
 ```
 
 **②가 이 구조의 핵심이다.** 두 판정이 각자 `detect()`를 부르면 추론이 2배가 되고,
@@ -167,18 +173,17 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 포즈 모델 하나로 박스와 키포인트를 함께 받는 설계(→ `decisions.md` 2026-08-19)가
 여기서 실제로 지켜진다.
 
-**⑤ 우선순위는 FALL > EXTEND > NORMAL.** 채널이 하나이므로 상태도 하나다. 쓰러진 사람이
+**⑤ 우선순위는 FALL > ZONE > NORMAL.** 채널이 하나이므로 상태도 하나다. 쓰러진 사람이
 있으면 연장 요구보다 그쪽이 급하다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
 
-### 2.4 연장 요구를 만드는 순서 (`SignalExtensionPipeline.process_boxes`)
+### 2.4 진척도를 만드는 순서 (`SignalExtensionPipeline.process_boxes`)
 
 ```
  1. detections = [(track_id, foot_point) for 사람 박스]
- 2. priority_mode = 보조 모델이 교통약자를 봤는가
- 3. confirmed = occupancy.update(detections)       {track_id: 구역번호} — 잔류 확정된 사람만
- 4. speeds    = speed.update_many(detections, t)   {track_id: TrackSpeed}
- 5. occupants = [Occupant(구역, ETA) for 확정 보행자]
- 6. extension_sec = rule.required_sec(occupants, priority_mode)   구역값 중 최댓값
+ 2. confirmed  = occupancy.update(detections)      {track_id: 구역번호} — 잔류 확정된 사람만
+ 3. progress   = CrossingProgress.update(...)      물리 구역 → 진입 방향 보정 → 진척도
+ 4. speeds     = speed.update_many(detections, t)  {track_id: TrackSpeed}  ※ 계측용
+ 5. progress_zone = minimum_progress(occupants)    가장 작은 진척도 = 가장 덜 건넌 사람
  7. eta_sec = rule.max_eta_sec(occupants)          ▸ USE_SPEED_FOR_EXTENSION이 True일 때만
  8. return FrameResult(...)
 ```
@@ -393,70 +398,56 @@ None이 되는 조건:
 
 ### 3.6 `src/signal_extend.py` — 연장 결정 (핵심 로직)
 
-#### `evaluate(remaining_time_sec, occupants, priority_mode=False)` → `int`(연장 초)
+#### `minimum_progress(occupants)` → `int | None`
 
-**입력** `occupants`: `Occupant(zone, eta_sec)` 또는 구역 번호(int)의 목록.
-int만 주면 `eta_sec=None`으로 해석한다.
+확정 보행자 중 **가장 작은 진척도**. 아무도 없으면 `None`(→ `NORMAL`).
 
-**판단 순서 — 위에서부터 걸리는 즉시 반환**
+**최솟값 하나면 되는 이유**: 아두이노의 기준표는 진척도에 대해 단조 감소한다
+(1번 9초 ... 5번 1초). 모든 사람이 같은 잔여 시간을 보므로
+
+    부족분 = 기준[진척도] - 잔여시간
+
+은 진척도가 작을수록 항상 크다. **가장 작은 진척도의 사람이 항상 가장 부족하다** —
+나머지 값은 볼 필요가 없다.
+
+#### `maximum_eta_sec(occupants)` → `float | None`
+
+가장 큰 ETA. **전송하지 않는다** — 화면 표시·진단용이다. 값이 계속 `None`이면 프레임률이
+낮거나 사람이 멈춰 있다는 뜻이지만, 연장 판단은 ETA 없이 돌아가므로 문제가 되지 않는다.
+
+> **상태도 없고 속도도 안 쓴다.** 누적·무장·임계값 비교는 제어부가 소유하고, 정상 보행
+> 속도는 아두이노의 기준표가 담고 있다. 이전에는 `SignalExtensionStateMachine`이
+> 222줄이었다. 이관 경위는 `docs/decisions.md` 2026-08-26 두 항목 참고.
+
+---
+
+### 3.6b `src/zone.py` — `CrossingProgress` (진입 방향 보정)
+
+물리 구역 번호는 좌표계 기준이라 **진입 방향에 따라 의미가 뒤집힌다.** 반대편에서 들어온
+사람의 '2번'은 '거의 다 건넜음'인데, 보정하지 않으면 '대부분 남았음'으로 읽혀 엉뚱한
+사람이 최솟값을 차지한다.
+
+| 메서드 | 하는 일 |
+|---|---|
+| `update(track_id, zone)` → `int` | 구역을 반영하고 진척도(1..N)를 돌려준다 |
+| `direction(track_id)` | `+1` / `-1` / `None`(미정) — 표시·진단용 |
+| `keep_only(track_ids)` | 사라진 트랙 정리 (ID 재사용 시 옛 방향이 따라붙지 않도록) |
+
+**방향 판별은 첫 검출 구역으로 한다** — 속도가 아니라 위치 이력이라 프레임률 요구가 없고,
+사람이 멈춰 있어도 유지된다.
 
 ```
-① 규칙 선택
-   ▸ priority_mode이고 우선 연장 맵이 설정됨 → 우선 규칙
-   ▸ 아니면                                  → 일반 규칙 (ZONE_EXTENSION_SEC)
-
-② 잔여시간 > 임계값?
-   → _armed = True (재무장), state = NORMAL, return 0
-   ★ 여기서만 재무장된다. 연장이 반영돼 시간이 회복됐다는 뜻이므로.
-
-③ 누적 연장 >= 상한?
-   → state = CAPPED, return 0
-
-④ _armed 가 False?  (이번 하강 구간에서 이미 발급함)
-   → state = EXTENDED, return 0
-   ★ 이것이 "프레임마다 연장"을 막는 장치다.
-
-⑤ 확정 보행자 없음?
-   → state = NORMAL, return 0
-
-⑥ 사람마다 필요량 계산 → 최댓값 = desired
-      필요량 = ZONE_EXTENSION_SEC[구역]                    (기본)
-      ▸ 구역 값이 0이면 (양 끝 1·5번)      → 0 (ETA 무관, 설계상 확정 규칙)
-      ▸ use_speed=False 또는 eta_sec=None  → 구역 값 그대로 (안전한 폴백)
-      ▸ 그 외 → min(구역 값, ceil(eta_sec × 안전계수 − 잔여시간))
-                부족분 <= 0 이면 0
-
-⑦ desired <= 0?
-   → state = NORMAL, return 0
-
-⑧ 연장 발급
-   step = min(desired, 상한 − 누적)
-   누적 += step;  _armed = False;  state = EXTENDING
-   return step
+첫 검출이 중앙보다 앞 → 정방향(+1) → 진척도 = 구역
+첫 검출이 중앙보다 뒤 → 역방향(-1) → 진척도 = N+1 - 구역
+첫 검출이 중앙        → 미정        → 중앙값으로 간주, 이후 이동으로 확정
 ```
 
-⚠️ `ZONE_EXTENSION_SEC[구역]`이 `None`이면 `NotImplementedError` (임의값으로 동작 금지)
+중앙에서 시작한 뒤 `3→4`든 `3→2`든 진척도 4로 수렴한다.
 
-**엣지 트리거가 필요한 이유** — `evaluate()`는 매 프레임 호출된다. 수정 전에는 10fps에서
-`[5, 5, 5, 0, ...]`으로 **0.3초 만에 상한을 소진하고 제어부로 명령을 3연타**로 보냈다.
-무장은 '하강'이 아니라 '발급'으로 소모되므로, 임계값 아래로 내려간 뒤 뒤늦게 들어온
-보행자도 놓치지 않는다.
-
-**상태값**
-
-#### `ZoneExtensionRule.required_sec(occupants, priority_mode=False) -> int`
-
-확정 보행자들의 구역으로 **필요한 연장 초**를 낸다. 여러 명이면 가장 큰 값
-(가장 오래 걸리는 사람을 도로에 가두지 않기 위해). 아무도 없거나 양 끝 구역만이면 0.
-
-#### `ZoneExtensionRule.max_eta_sec(occupants) -> float | None`
-
-가장 오래 걸리는 사람의 ETA. **양 끝 구역(연장 0)에 있는 사람은 제외한다** — 어차피
-연장을 주지 않기로 한 사람의 ETA를 보내면 아두이노가 줄 수 없는 시간으로 계산하게 된다.
-
-> **상태가 없다.** 누적·무장·임계값 비교는 여기 없다. 전부 제어부(아두이노)가 소유한다.
-> 이전에는 `SignalExtensionStateMachine`이 그 일을 했고 파일이 222줄이었다.
-> 이관 경위는 `docs/decisions.md` 2026-08-26 항목 참고.
+⚠️ **오판하면 어느 쪽으로 틀리는가**: 중간에 ID가 재발급되면 방향을 반대로 볼 수 있다.
+그때 진척도는 **실제보다 작게** 나오고, 작은 진척도는 '덜 왔다'이므로 아두이노가
+**더 연장하는** 쪽으로 틀린다 — 보행자가 갇히는 것보다 차가 기다리는 편이 낫다는
+이 프로젝트의 기존 판단과 같은 방향이다.
 
 ---
 
