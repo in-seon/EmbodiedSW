@@ -1,8 +1,7 @@
 """실행 진입점.
 
-    python main.py                      # 전체 (기본값)
-    python main.py --mode fall          # 전체 + 서보로 쓰러짐 연출 (시연용)
-    python main.py --mode fall-only     # 쓰러짐 감지만 (zone 캘리브레이션 없이)
+    python main.py                 # 전체: 구역 기반 신호 연장 + 쓰러짐 감지 (기본값)
+    python main.py --mode fall     # 쓰러짐 감지만 (zone 캘리브레이션 없이)
 
 ## 파이가 하는 일 / 아두이노가 하는 일
 
@@ -21,46 +20,21 @@
 
 ## 모드
 
-    --mode full        전체: 구역 기반 신호 연장 + 쓰러짐 감지 + 모터  (기본값)
-    --mode fall        위와 **똑같이 전체를 돌리되**, 서보로 모형을 눕혀 쓰러짐을 연출한다.
-                       손으로 넘어뜨리면 프레임에 사람 손이 들어와 검출을 교란하므로
-                       원격으로 눕히는 편이 낫다. 눕히는 것은 시연 장치일 뿐이고,
-                       판정은 평소와 **완전히 같은 경로**를 통과한다.
-    --mode fall-only   쓰러짐 감지만. zone 캘리브레이션 없이 돌아가므로 카메라만 놓고
-                       바로 확인할 때 쓴다(신호 연장·모터는 동작하지 않는다).
+    --mode full   전체: 구역 기반 신호 연장 + 쓰러짐 감지 (기본값, zone 설정 필요)
+    --mode fall   쓰러짐 감지만. zone 캘리브레이션 없이 돌아가므로 카메라만 놓고
+                  바로 확인할 때 쓴다.
 
 ## 옵션
 
-    --source           카메라 소스. 생략하면 config.CAMERA_SOURCE
-    --port             시리얼 포트. 생략하면 자동 탐색
-    --display          창을 띄운다 (모니터 없으면 쓰지 말 것). q=종료, r=알람 해제
-    --no-serial        아두이노 없이 판정만 확인
-    --no-motor         모터 GPIO를 잡지 않는다 (개발 PC / 모형 없이 확인할 때)
-    --fall-after <초>  --mode fall 에서 몇 초 뒤에 눕힐지 (기본 config.SERVO_FALL_AFTER_SEC)
-    --fall-hold <초>   눕힌 뒤 몇 초 후 다시 세울지 (기본 config.SERVO_FALL_HOLD_SEC)
+    --source      카메라 소스. 생략하면 config.CAMERA_SOURCE
+    --port        시리얼 포트. 생략하면 자동 탐색
+    --display     창을 띄운다 (모니터 없으면 쓰지 말 것). q=종료, r=알람 해제
+    --no-serial   아두이노 없이 판정만 확인
 
-## 모형에 달린 모터는 둘이다
+## 모형 구동은 여기서 하지 않는다
 
-    스텝모터  횡단보도를 따라 모형을 끌고 간다      (L298N + NEMA17, config.MOTOR_*)
-    서보      모형 발에 붙어 쓰러뜨린다             (--mode fall 전용, config.SERVO_*)
-
---mode fall 에서 둘은 맞물려 움직인다:
-
-    START -> 끌고 감 -> [눕힘 + 구동 정지] -> [일으킴 + 구동 재개] -> 다 건넘 -> 정지
-
-넘어진 모형을 계속 끌고 가면 안 되지만, 일어난 뒤에는 마저 건너야 한다. 그래서 이때의
-멈춤은 '정지'가 아니라 **'일시정지'**다 — 같은 횡단을 이어서 간다(src/motor.py).
-
-## 모형 보행자 모터는 아두이노가 켜고 파이가 끈다
-
-모터는 아두이노 핀이 모자라 **파이 GPIO에 붙어 있다.** 그런데 "보행 녹색이 시작됐다"는
-신호를 소유한 아두이노만 알고, "모형이 다 건넜다"는 영상을 보는 파이만 안다.
-
-    아두이노 -> 파이 : START [모드]     녹색 시작. 모형을 출발시켜라
-    파이 자체 판단   : 확정 보행자가 있었다가 사라짐 -> 정지
-
-'없음'이 아니라 '있었다가 없어짐'인 이유: START 시점에는 모형이 아직 횡단보도 밖이라
-확정 보행자가 0명이다. '없으면 정지'로 짜면 출발도 못 하고 멈춘다(src/motor.py).
+모형 보행자를 움직이는 모터와 쓰러뜨리는 서보는 **별도 보드**가 맡는다. 파이는
+카메라로 보고 판단해서 상태를 흘려보내는 일만 한다 — 시리얼도 한 방향이다.
 
 ## 부분만 확인하고 싶을 때
 
@@ -98,10 +72,6 @@ class _NullSerial:
     def ping(self):
         return True
 
-    def take_commands(self):
-        """아두이노가 없으므로 START도 오지 않는다 -> 모터도 돌지 않는다."""
-        return []
-
     def open(self):
         return self
 
@@ -123,44 +93,6 @@ def _make_serial(args):
 
     print("[안내] 아두이노가 리셋되어 부팅할 때까지 잠시 기다립니다...")
     return SerialComm(port=args.port)
-
-
-def _make_motor(args):
-    """모형 보행자 스텝모터. --no-motor 이거나 GPIO가 없으면 NullMotor로 떨어진다."""
-    from src.motor import NullMotor, StepperMotor
-
-    if args.no_motor:
-        print("[안내] --no-motor: 모터 GPIO를 잡지 않습니다(판단 로직만 확인).")
-        return NullMotor()
-    try:
-        import gpiozero  # noqa: F401
-    except ImportError:
-        # 개발 PC에서 흔한 경우다. 여기서 죽이면 노트북에서 아무것도 확인할 수 없고,
-        # 조용히 넘어가면 파이에서 "왜 모터가 안 도는지"를 못 찾는다. 그래서 알리고 계속한다.
-        print("[안내] gpiozero가 없어 모터를 비활성화합니다(라즈베리파이가 아닌 듯합니다).")
-        return NullMotor()
-    return StepperMotor()
-
-
-def _make_fall_scheduler(args):
-    """--mode fall 의 서보 연출. 실패해도 본체는 계속 돌린다."""
-    from src.servo import FallScheduler, FallServo
-
-    after = config.SERVO_FALL_AFTER_SEC if args.fall_after is None else args.fall_after
-    # hold 기본값이 '계속 누워 있음'이 아닌 이유: 데모에서는 일어나서 마저 건너는 것까지
-    # 보여야 하고, 그때 구동 모터도 다시 움직여야 한다(config 주석 참고).
-    hold_sec = config.SERVO_FALL_HOLD_SEC if args.fall_hold is None else args.fall_hold
-    try:
-        import gpiozero  # noqa: F401
-    except ImportError:
-        print("[안내] gpiozero가 없어 서보 연출을 건너뜁니다. 감지 자체는 그대로 동작합니다.")
-        print("       (모형을 손으로 눕혀도 되지만, 프레임에 손이 들어가면 검출이 흔들립니다)")
-        return None
-
-    servo = FallServo()
-    print(f"[시연] {after:.1f}초 뒤 서보가 모형을 눕히고, {hold_sec:.1f}초 뒤 다시 세웁니다.")
-    print("[시연] 눕히는 동안 구동 모터는 멈췄다가, 일으키면 이어서 움직입니다.")
-    return FallScheduler(servo, fall_after_sec=after, hold_sec=hold_sec)
 
 
 def _load_zones(required: bool):
@@ -185,7 +117,7 @@ def _load_zones(required: bool):
                 "  캘리브레이션을 먼저 하세요 — 화면에서 횡단보도 네 꼭짓점을 찍습니다:\n"
                 "      python tools/zone_calibrator.py\n"
                 "  구역 설정 없이 쓰러짐 감지만 확인하려면:\n"
-                "      python main.py --mode fall-only"
+                "      python main.py --mode fall"
             ) from exc
     try:
         zones = CrosswalkZones.load()
@@ -245,7 +177,7 @@ def _describe(state, zone, result_line):
     return f"{mark}{result_line}"
 
 
-def run_fall_only_mode(args):
+def run_fall_mode(args):
     """쓰러짐 감지만. zone 캘리브레이션 없이 돌아가는 것이 이 모드의 존재 이유다."""
     from src.capture import CameraCapture
     from src.detection import PersonDetector
@@ -302,70 +234,36 @@ def run_full_mode(args):
         serial_comm=_NoSend(),
         speed_estimator=SpeedEstimator(ground_plane=zones.ground_plane),
     )
-    from src.servo import FELL, STOOD
-
-    motor = _make_motor(args)
     pipeline = CombinedPipeline(
         camera=camera,
         detector=detector,
         serial_comm=_make_serial(args),
         extension=extension,
         zones=zones,
-        motor=motor,
     )
-    # 서보는 파이프라인 밖에 둔다 — 감지 결과에 반응하는 장치가 아니라 감지될 사건을
-    # 만드는 장치라서다. 파이프라인은 이것이 있는지도 모르는 채로 판정한다.
-    scheduler = _make_fall_scheduler(args) if args.mode == "fall" else None
-
     print(f"[안내] 카메라 백엔드: {pipeline.camera.backend_name} (source={args.source!r})")
     print(f"[안내] 속도 단위: {pipeline.extension.speed.unit}  (계측용 — 연장 판단에는 쓰지 않음)")
-    print("[안내] 모터: 아두이노가 START를 보내면 기동, 모형이 다 건너면 자동 정지합니다.")
     print("[안내] 종료: " + ("창에서 q" if args.display else "Ctrl+C") + "\n")
 
     reporter = _Reporter(args.display)
 
     def on_result(result, frame):
-        if scheduler is not None:
-            now = time.monotonic()
-            event = scheduler.tick(now)
-            if event is not None:
-                print(event.message, flush=True)
-                # 모형에 달린 두 모터를 맞춰 준다: 넘어지는 동안은 끌고 가지 않고,
-                # 일어나면 멈춘 지점부터 이어서 간다. 정지가 아니라 일시정지다.
-                if event.kind == FELL:
-                    pipeline.pause_motor(now=now)
-                elif event.kind == STOOD:
-                    pipeline.resume_motor(now=now)
-        if result.motor_event:
-            print(f"[모터] {result.motor_event}", flush=True)
-
         ext = result.extension
         extra = ""
         if ext.occupied_zones:
             extra += f" zone={ext.occupied_zones}"
         if ext.eta_sec is not None:
             extra += f" ETA={ext.eta_sec:.1f}s"   # 계측용 — 전송하지 않는다
-        if result.motor_paused:
-            extra += " [모터 멈춤]"
-        elif result.motor_running:
-            extra += " [모터]"
         if result.line_sent:
             extra += f"  -> {result.line_sent}"
         text = (f"사람 {len(ext.pedestrians)}명 | "
                 + _describe(result.state, result.zone, extra))
-        reporter.tick((result.state, result.zone,
-                       result.motor_running, result.motor_paused), text)
+        reporter.tick((result.state, result.zone), text)
         if args.display:
             return _draw(frame, text, result.fall.fall_confirmed, pipeline)
         return True
 
-    try:
-        _drive(pipeline, on_result)
-    finally:
-        # 눕힌 채로 끝내지 않는다 — 다음 실행이 '이미 쓰러진 사람'에서 시작하면
-        # FALL이 즉시 확정돼 무엇을 시연하려던 것인지 알 수 없게 된다.
-        if scheduler is not None:
-            scheduler.servo.close()
+    _drive(pipeline, on_result)
 
 
 def _drive(pipeline, on_result):
@@ -404,9 +302,9 @@ def _draw(frame, text, alarm, pipeline):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("full", "fall", "fall-only"), default="full",
-                        help="full = 전체(기본) / fall = 전체 + 서보로 쓰러짐 연출 / "
-                             "fall-only = 쓰러짐 감지만(zone 설정 없이도 동작)")
+    parser.add_argument("--mode", choices=("full", "fall"), default="full",
+                        help="full = 신호 연장 + 쓰러짐 감지(기본, zone 설정 필요) / "
+                             "fall = 쓰러짐 감지만(zone 설정 없이도 동작)")
     parser.add_argument("--source", default=None,
                         help="카메라 소스. 생략하면 config.CAMERA_SOURCE.")
     parser.add_argument("--port", default=None,
@@ -415,15 +313,6 @@ def main():
                         help="창을 띄운다. 모니터가 없으면 쓰지 말 것(기본은 stdout 출력).")
     parser.add_argument("--no-serial", action="store_true",
                         help="아두이노 없이 판정만 확인한다.")
-    parser.add_argument("--no-motor", action="store_true",
-                        help="모터 GPIO를 잡지 않는다. 라즈베리파이가 아니면 자동으로 이렇게 된다.")
-    parser.add_argument("--fall-after", type=float, default=None,
-                        help="--mode fall 에서 서보가 모형을 눕히기까지의 지연(초). "
-                             "생략하면 config.SERVO_FALL_AFTER_SEC.")
-    parser.add_argument("--fall-hold", type=float, default=None,
-                        help="--mode fall 에서 눕힌 뒤 다시 세우기까지의 시간(초). "
-                             "생략하면 config.SERVO_FALL_HOLD_SEC. 이 시간 동안 구동 "
-                             "모터도 함께 멈춰 있다가, 일으키면 이어서 움직인다.")
     parser.add_argument("--confirm-frames", type=int, default=config.ZONE_RESIDENCY_FRAMES,
                         help="'확정 보행자'로 보기까지 필요한 연속 검출 프레임 수. "
                              "config.ZONE_RESIDENCY_FRAMES가 아직 미정(None)이라, 실측 FPS로 "
@@ -438,14 +327,9 @@ def main():
     from src.capture import normalize_source
     args.source = normalize_source(args.source)
 
-    if args.mode != "fall" and (args.fall_after is not None or args.fall_hold is not None):
-        # 조용히 무시하면 "왜 서보가 안 도는지"를 찾느라 시간을 버린다.
-        print("[경고] --fall-after / --fall-hold 는 --mode fall 에서만 동작합니다. 무시합니다.")
-
-    if args.mode == "fall-only":
-        run_fall_only_mode(args)
+    if args.mode == "fall":
+        run_fall_mode(args)
     else:
-        # full 과 fall 은 같은 파이프라인이다 — fall 은 서보 연출이 붙을 뿐이다.
         run_full_mode(args)
 
 

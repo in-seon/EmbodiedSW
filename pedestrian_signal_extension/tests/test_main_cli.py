@@ -20,7 +20,7 @@ def dispatch(monkeypatch):
     """세 실행 함수를 가로채고, 호출된 이름과 args를 기록한다."""
     calls = []
 
-    for name in ("run_full_mode", "run_fall_only_mode"):
+    for name in ("run_full_mode", "run_fall_mode"):
         assert hasattr(main_module, name), f"{name} 이 사라졌다 — 분기가 부러진다"
         monkeypatch.setattr(
             main_module, name,
@@ -44,20 +44,11 @@ def test_default_mode_is_full(dispatch, monkeypatch):
     assert args.mode == "full"
 
 
-def test_fall_mode_runs_the_full_pipeline(dispatch, monkeypatch):
-    """--mode fall 은 '쓰러짐만'이 아니라 **전체 + 서보 연출**이다.
-
-    모형에 달린 두 모터가 맞물려 도는 시연 모드라, 신호 연장도 같이 돌아야 한다.
-    """
+def test_fall_mode_is_reachable(dispatch, monkeypatch):
+    """★ 한때 함수 개명이 호출부에 반영되지 않아 NameError로 죽어 있던 경로."""
     name, args = run(dispatch, monkeypatch, "--mode", "fall")
-    assert name == "run_full_mode"
+    assert name == "run_fall_mode"
     assert args.mode == "fall"
-
-
-def test_fall_only_mode_is_reachable(dispatch, monkeypatch):
-    """★ 실제로 NameError로 죽어 있던 경로."""
-    name, args = run(dispatch, monkeypatch, "--mode", "fall-only")
-    assert name == "run_fall_only_mode"
 
 
 def test_unknown_mode_is_rejected(monkeypatch):
@@ -66,29 +57,8 @@ def test_unknown_mode_is_rejected(monkeypatch):
         main_module.main()
 
 
-def test_fall_timings_default_to_config(dispatch, monkeypatch):
-    """생략하면 None으로 넘어가고, 실제 기본값은 스케줄러를 만들 때 config에서 읽는다."""
-    _, args = run(dispatch, monkeypatch, "--mode", "fall")
-    assert args.fall_after is None
-    assert args.fall_hold is None
-
-
-def test_fall_timings_are_parsed_as_numbers(dispatch, monkeypatch):
-    _, args = run(dispatch, monkeypatch,
-                  "--mode", "fall", "--fall-after", "3", "--fall-hold", "7.5")
-    assert args.fall_after == 3.0
-    assert args.fall_hold == 7.5
-
-
-def test_fall_timing_outside_fall_mode_warns(dispatch, monkeypatch, capsys):
-    """조용히 무시하면 "왜 서보가 안 도는지"를 찾느라 시간을 버린다."""
-    run(dispatch, monkeypatch, "--fall-after", "3")
-    assert "--mode fall" in capsys.readouterr().out
-
-
-def test_no_motor_and_no_serial_are_flags(dispatch, monkeypatch):
-    _, args = run(dispatch, monkeypatch, "--no-motor", "--no-serial")
-    assert args.no_motor is True
+def test_no_serial_is_a_flag(dispatch, monkeypatch):
+    _, args = run(dispatch, monkeypatch, "--no-serial")
     assert args.no_serial is True
 
 
