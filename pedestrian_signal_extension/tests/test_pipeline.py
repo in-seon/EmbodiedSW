@@ -355,3 +355,56 @@ def test_normal_means_nobody_not_fall_cleared():
     )
     assert combined.process_frame(None, timestamp=0.0).state == STATE_NORMAL
 
+
+
+# --- track_id 재발급: 카운트와 방향이 함께 이어져야 한다 ---
+#
+# occupancy가 이름을 바꿔도 CrossingProgress가 모르면 방향이 날아간다. 그러면 거의 다
+# 건넌 사람이 "방금 진입"으로 보고돼 아두이노가 연장을 다시 시작한다.
+
+def test_progress_survives_track_id_reissue():
+    """★ 이 기능의 본체. 상속이 없으면 진척도가 4,5 대신 2,1로 뒤집힌다."""
+    # 구역은 y 방향 5등분(0..200) -> 구역 k는 y in [40*(k-1), 40*k].
+    frames = [
+        [box_at(50, 20, 1)],    # 구역 1
+        [box_at(50, 60, 1)],    # 구역 2
+        [box_at(50, 100, 1)],   # 구역 3
+        [box_at(50, 140, 7)],   # 구역 4 — 여기서 ID 재발급
+        [box_at(50, 180, 7)],   # 구역 5
+    ]
+    pipeline = build_pipeline(frames)
+    pipeline.occupancy.inherit_distance = 60     # 픽셀 (구역 하나가 40px)
+
+    seen = [pipeline.process_frame(None, timestamp=i * 0.1).progress
+            for i in range(len(frames))]
+    assert seen[-2:] == [4, 5], f"진척도가 뒤집혔다: {seen}"
+
+
+def test_progress_is_reversed_without_inheritance():
+    """상속을 끄면 실제로 뒤집힌다 — 위 테스트가 무엇을 막고 있는지 고정한다."""
+    frames = [
+        [box_at(50, 20, 1)],
+        [box_at(50, 60, 1)],
+        [box_at(50, 100, 1)],
+        [box_at(50, 140, 7)],
+        [box_at(50, 180, 7)],
+    ]
+    pipeline = build_pipeline(frames)
+    pipeline.occupancy.inherit_distance = 0      # 상속 끔
+
+    seen = [pipeline.process_frame(None, timestamp=i * 0.1).progress
+            for i in range(len(frames))]
+    assert seen[-2:] == [2, 1], f"상속을 껐는데 뒤집히지 않았다: {seen}"
+
+
+def test_reissue_keeps_sending_zone_without_a_normal_gap():
+    """재발급 프레임에도 확정 보행자가 유지되어 normal이 끼어들지 않는다."""
+    inside = [box_at(50, 100, 1)]
+    frames = [inside, inside, [box_at(50, 105, 7)]]
+    pipeline = build_pipeline(frames)
+    pipeline.occupancy.inherit_distance = 60
+
+    states = [pipeline.process_frame(None, timestamp=i * 0.1).serial_state()[0]
+              for i in range(len(frames))]
+    assert states[-1] == STATE_ZONE
+    assert STATE_NORMAL not in states[1:]

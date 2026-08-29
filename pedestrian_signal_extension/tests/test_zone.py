@@ -418,3 +418,161 @@ def test_keep_only_drops_missing_tracks():
     p.keep_only(["h"])
     assert p.direction("h") == 1
     assert p.direction("i") is None
+
+
+# --- track_id 재발급 상속 ---
+#
+# ByteTrack은 가림·모션블러에서 같은 사람에게 새 ID를 준다. 그러면 잔류 카운트가 0으로
+# 돌아갈 뿐 아니라 **CrossingProgress의 진입 방향이 통째로 날아간다.** 방향을 잃으면
+# 거의 다 건넌 사람(구역 4)이 "방금 진입"(진척도 2)으로 보고돼 아두이노가 연장을 다시
+# 시작한다 — 재확정 지연(0.25초)보다 이쪽이 훨씬 비싸다.
+#
+# 쓰러짐 감지에는 이미 같은 보정이 있다(FallTracker._resolve_keys). 그쪽은 bbox 겹침으로
+# 맞추지만 여기는 발 위치만 받으므로 **거리**로 맞춘다 — 구역 판정 기준과 같은 좌표다.
+
+def _occupancy(confirm_frames=2, grace_frames=2, inherit_distance=5, **kwargs):
+    """QUAD는 실측 치수가 없어 호모그래피가 없다 -> 거리 단위가 픽셀이다.
+
+    QUAD가 50px 길이라 구역 하나가 10px다. 임계값 5px = 구역 절반으로 잡아,
+    '같은 구역 안의 흔들림'은 잇고 '한 구역 이상 떨어진 것'은 남남이 되게 한다.
+    """
+    zones = CrosswalkZones.from_quad(QUAD, n=5)
+    return CrosswalkOccupancy(zones, confirm_frames=confirm_frames,
+                              grace_frames=grace_frames,
+                              inherit_distance=inherit_distance, **kwargs)
+
+
+def test_new_id_near_lost_track_inherits_its_count():
+    """★ 이 기능의 본체 — 새 ID가 즉시 '확정 보행자'가 되어 전송이 끊기지 않는다."""
+    occ = _occupancy()
+    occ.update([(1, (25, 5))])
+    occ.update([(1, (26, 5))])
+    assert 1 in occ.confirmed()
+
+    occ.update([(7, (27, 5))])          # 같은 자리, 새 ID
+    confirmed = occ.confirmed()
+    assert 7 in confirmed
+    assert 1 not in confirmed, "옛 ID가 남아 유령 보행자가 되면 안 된다"
+
+
+def test_rekey_is_reported_so_progress_can_follow():
+    """occupancy가 이름을 바꿔도 CrossingProgress가 모르면 방향은 그대로 날아간다."""
+    occ = _occupancy()
+    occ.update([(1, (25, 5))])
+    occ.update([(1, (26, 5))])
+    assert occ.rekeyed == []
+
+    occ.update([(7, (27, 5))])
+    assert occ.rekeyed == [(1, 7)]
+
+    occ.update([(7, (28, 5))])
+    assert occ.rekeyed == [], "재발급이 없는 프레임에는 비어 있어야 한다"
+
+
+def test_distant_new_id_is_a_different_person():
+    """임계 거리를 넘으면 남남이다. 아니면 반대편 사람의 방향을 물려받는다."""
+    occ = _occupancy()
+    occ.update([(1, (5, 5))])
+    occ.update([(1, (5, 5))])
+
+    occ.update([(7, (45, 5))])          # 횡단보도 반대쪽 끝
+    assert occ.rekeyed == []
+    assert 7 not in occ.confirmed()
+
+
+def test_visible_track_is_not_robbed():
+    """★ 살아 있는 사람의 상태를 뺏으면 안 된다.
+
+    두 사람이 나란히 있을 때 한쪽에 새 ID가 붙었다고 옆 사람 상태를 가져가면,
+    옆 사람은 확정이 풀리고 새 ID는 남의 방향을 얻는다.
+    """
+    occ = _occupancy()
+    occ.update([(1, (25, 5))])
+    occ.update([(1, (25, 5))])
+
+    occ.update([(1, (25, 5)), (7, (26, 5))])   # 1번은 이번 프레임에도 보인다
+    assert occ.rekeyed == []
+    assert 1 in occ.confirmed()
+
+
+def test_expired_track_is_not_inherited():
+    """유예 창을 넘겨 버려진 트랙은 후보가 아니다."""
+    occ = _occupancy(grace_frames=1)
+    occ.update([(1, (25, 5))])
+    occ.update([(1, (25, 5))])
+    occ.update([])                      # miss 1 — 아직 유예 안
+    occ.update([])                      # miss 2 > grace -> 폐기
+
+    occ.update([(7, (25, 5))])
+    assert occ.rekeyed == []
+
+
+def test_one_lost_track_is_claimed_by_the_nearest_detection_only():
+    """두 검출이 한 트랙을 나눠 가지면 상태가 복제된다."""
+    occ = _occupancy()
+    occ.update([(1, (25, 5))])
+    occ.update([(1, (25, 5))])
+
+    occ.update([(7, (26, 5)), (8, (28, 5))])   # 둘 다 근처
+    assert occ.rekeyed == [(1, 7)], "가장 가까운 검출 하나만 물려받는다"
+    assert 8 not in occ.confirmed()
+
+
+def test_id_collision_does_not_clobber_existing_state():
+    """이미 쓰이는 번호로 검출돼도 남의 상태를 덮어쓰지 않는다.
+
+    구조적으로 보장된다 — 상속 후보는 '이번 프레임에 처음 보는 ID'뿐이라,
+    이미 관리 중인 번호는 애초에 상속 경로를 타지 않는다.
+    """
+    occ = _occupancy()
+    occ.update([(1, (5, 5)), (2, (25, 5))])
+    occ.update([(1, (5, 5)), (2, (25, 5))])
+
+    # 1번이 사라지고, 그 자리에 '2'라는 이미 쓰이는 번호로 검출됐다(비정상이지만 방어).
+    occ.update([(2, (25, 5))])
+    assert 2 in occ.confirmed()
+    assert occ.rekeyed == []
+
+
+def test_inheritance_can_be_disabled():
+    """거리 0이면 상속하지 않는다 — 동작을 끄고 비교해볼 수 있어야 한다."""
+    occ = _occupancy(inherit_distance=0)
+    occ.update([(1, (25, 5))])
+    occ.update([(1, (25, 5))])
+    occ.update([(7, (25, 5))])
+    assert occ.rekeyed == []
+
+
+# --- CrossingProgress.rekey ---
+
+def test_progress_rekey_preserves_direction():
+    """★ 방향이 유지되면 진척도가 뒤집히지 않는다."""
+    progress = CrossingProgress(zone_count=5)
+    for zone in (1, 2, 3):
+        progress.update(1, zone)
+
+    progress.rekey(1, 7)
+    assert progress.direction(7) == 1
+    assert progress.update(7, 4) == 4      # 상속이 없으면 2가 나온다
+    assert progress.update(7, 5) == 5      # 상속이 없으면 1이 나온다
+
+
+def test_progress_rekey_forgets_the_old_id():
+    progress = CrossingProgress(zone_count=5)
+    progress.update(1, 1)
+    progress.rekey(1, 7)
+    assert progress.direction(1) is None
+
+
+def test_progress_rekey_does_not_clobber_an_existing_id():
+    progress = CrossingProgress(zone_count=5)
+    progress.update(1, 1)                  # 정방향
+    progress.update(2, 5)                  # 역방향
+    progress.rekey(1, 2)
+    assert progress.direction(2) == -1, "이미 쓰이는 ID의 방향을 덮어쓰면 안 된다"
+
+
+def test_progress_rekey_of_unknown_id_is_harmless():
+    progress = CrossingProgress(zone_count=5)
+    progress.rekey(99, 100)
+    assert progress.direction(100) is None

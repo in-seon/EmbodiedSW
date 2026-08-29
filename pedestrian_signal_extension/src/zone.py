@@ -194,7 +194,8 @@ class CrosswalkOccupancy:
     그쪽 누적(fall_confirm_sec)이 시간 기준이라서다 — config.TRACK_GRACE_FRAMES 주석 참고.
     """
 
-    def __init__(self, crosswalk_zones: CrosswalkZones, confirm_frames=None, grace_frames=None):
+    def __init__(self, crosswalk_zones: CrosswalkZones, confirm_frames=None,
+                 grace_frames=None, inherit_distance=None):
         self.zones = crosswalk_zones
         self.confirm_frames = confirm_frames or config.ZONE_RESIDENCY_FRAMES
         if self.confirm_frames is None:
@@ -209,10 +210,24 @@ class CrosswalkOccupancy:
             raise ValueError(
                 f"grace_frames는 0 이상이어야 합니다(0 = 유예 없음): {self.grace_frames}"
             )
-        # track_id -> {"count": 연속 프레임 수, "zone": 최근 구역 번호, "misses": 연속 미검출 수}
+        # 새 track_id를 직전에 사라진 트랙에 이어붙일 거리 임계값. 0이면 상속하지 않는다.
+        # 호모그래피가 있으면 cm, 없으면 px 단위다 (_distance 참고).
+        if inherit_distance is not None:
+            self.inherit_distance = inherit_distance
+        elif self.zones.ground_plane is not None:
+            self.inherit_distance = config.TRACK_INHERIT_DISTANCE_CM
+        else:
+            self.inherit_distance = config.TRACK_INHERIT_DISTANCE_PX
+
+        # track_id -> {"count": 연속 프레임 수, "zone": 최근 구역 번호,
+        #              "misses": 연속 미검출 수, "point": 마지막으로 본 발 위치}
         self._state = {}
         # 직전 update()에서 track_id가 없어 무시한 검출 수 (아래 update 주석 참고).
         self.untracked_count = 0
+        # 직전 update()에서 이어붙인 [(옛 track_id, 새 track_id)].
+        # 파이프라인이 CrossingProgress에도 같은 이름 변경을 전달해야 한다 — 그러지 않으면
+        # 카운트만 살아남고 **진입 방향은 그대로 날아간다**(이 기능의 핵심 이유).
+        self.rekeyed = []
 
     def update(self, detections) -> dict:
         """이번 프레임 검출을 반영하고, 확정 보행자의 {track_id: zone_index} 를 반환한다.
@@ -229,6 +244,13 @@ class CrosswalkOccupancy:
         """
         seen = set()
         self.untracked_count = 0
+        self.rekeyed = []
+
+        detections = list(detections)
+        # 상속을 먼저 처리한다. 여기서 이름이 바뀌면 아래 루프가 새 이름으로 카운트를
+        # 이어서 올린다 — 즉 상속된 트랙은 이번 프레임에 곧바로 확정 보행자가 된다.
+        self._inherit_reissued_ids(detections)
+
         for track_id, point in detections:
             if track_id is None:
                 self.untracked_count += 1
@@ -239,10 +261,12 @@ class CrosswalkOccupancy:
                 self._state.pop(track_id, None)
                 continue
             seen.add(track_id)
-            st = self._state.get(track_id, {"count": 0, "zone": None, "misses": 0})
+            st = self._state.get(track_id,
+                                 {"count": 0, "zone": None, "misses": 0, "point": None})
             st["count"] += 1
             st["zone"] = zone_index
             st["misses"] = 0
+            st["point"] = point
             self._state[track_id] = st
 
         # 이번 프레임에 검출되지 않은 트랙: 유예 안에서는 상태를 그대로 두고(카운트 동결),
@@ -256,6 +280,70 @@ class CrosswalkOccupancy:
                 self._state.pop(track_id, None)
 
         return self.confirmed()
+
+    def _distance(self, a, b) -> float:
+        """두 발 위치의 거리. 호모그래피가 있으면 cm, 없으면 px.
+
+        cm로 재는 이유: 픽셀 거리는 원근 때문에 **화면 위쪽(먼 곳)에서 훨씬 작게** 나온다.
+        같은 임계값이 가까운 쪽에서는 빡빡하고 먼 쪽에서는 헐거워져, 하필 검출이 불안정한
+        먼 쪽에서 남남을 이어붙인다. 구역을 실거리로 등분하는 것과 같은 이유다.
+        """
+        plane = self.zones.ground_plane
+        if plane is not None:
+            a, b = plane.to_ground(a), plane.to_ground(b)
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    def _inherit_reissued_ids(self, detections):
+        """'처음 보는 ID'를 직전에 사라진 트랙에 이어붙인다 (같은 사람으로 간주).
+
+        ## 후보 규칙
+
+          - **처음 보는 ID만** 이어붙인다. 이미 관리 중인 번호는 빠른 경로로 지나간다.
+            덕분에 "남의 상태를 덮어쓴다"가 구조적으로 불가능하다.
+          - **이번 프레임에 보인 트랙은 후보가 아니다.** 살아 있는 사람의 상태를 뺏으면
+            그 사람은 확정이 풀리고 새 ID는 남의 방향을 얻는다 — 두 번 틀린다.
+          - track_id가 None인 검출은 상속하지 않는다. 프레임 간 대응을 모르는 검출이라
+            '같은 사람'의 근거가 위치뿐인데, 그것만으로 확정 보행자를 만들면 스쳐가는
+            오검출이 연장을 일으킨다.
+
+        ## 왜 전역 최근접인가
+
+        검출마다 순서대로 "가장 가까운 후보"를 집으면 **처리 순서에 결과가 좌우된다.**
+        두 사람이 스쳐 지날 때 먼저 처리된 검출이 남의 트랙을 집어가면 나머지도 연쇄로
+        어긋난다. 가능한 (검출, 트랙) 쌍을 모두 만들어 거리순으로 배정하면 그 순서
+        의존이 없어진다.
+        """
+        if self.inherit_distance <= 0:
+            return
+
+        fresh = [(i, tid, pt) for i, (tid, pt) in enumerate(detections)
+                 if tid is not None and tid not in self._state]
+        if not fresh:
+            return
+
+        visible = {tid for tid, _ in detections if tid is not None}
+        lost = [tid for tid, st in self._state.items()
+                if tid not in visible and st["point"] is not None]
+        if not lost:
+            return
+
+        pairs = []
+        for index, _, point in fresh:
+            for old_id in lost:
+                distance = self._distance(point, self._state[old_id]["point"])
+                if distance <= self.inherit_distance:
+                    pairs.append((distance, index, old_id))
+        pairs.sort(key=lambda p: (p[0], p[1]))
+
+        claimed_detections, claimed_tracks = set(), set()
+        for _, index, old_id in pairs:
+            if index in claimed_detections or old_id in claimed_tracks:
+                continue
+            new_id = detections[index][0]
+            self._state[new_id] = self._state.pop(old_id)
+            self.rekeyed.append((old_id, new_id))
+            claimed_detections.add(index)
+            claimed_tracks.add(old_id)
 
     def confirmed(self) -> dict:
         """확정 보행자 {track_id: zone_index}."""
@@ -272,6 +360,7 @@ class CrosswalkOccupancy:
     def clear(self):
         self._state.clear()
         self.untracked_count = 0
+        self.rekeyed = []
 
 
 class CrossingProgress:
@@ -344,6 +433,22 @@ class CrossingProgress:
     def direction(self, track_id):
         """+1 / -1 / None(미정). 화면 표시·진단용."""
         return self._direction.get(track_id)
+
+    def rekey(self, old_track_id, new_track_id):
+        """트래커가 같은 사람에게 새 ID를 준 경우, 방향 래치를 그 ID로 옮긴다.
+
+        **이 기능의 존재 이유가 여기 있다.** 카운트만 물려받고 방향을 잃으면, 거의 다
+        건넌 사람(구역 4)이 "중앙보다 뒤에서 처음 보였다"로 해석돼 역방향으로 확정되고
+        진척도가 4가 아니라 2로 나간다. 그 뒤로는 5번 구역에서 1이 나와 **진척도가
+        감소하며** 아두이노가 매번 새로 연장한다.
+
+        이미 쓰이는 번호면 아무것도 하지 않는다 — 남의 방향을 덮어쓰느니 새 사람으로
+        보는 편이 낫다(그 경우의 오차는 '덜 왔다'고 보는 쪽 = 안전한 쪽이다).
+        """
+        if new_track_id in self._first_zone or old_track_id not in self._first_zone:
+            return
+        self._first_zone[new_track_id] = self._first_zone.pop(old_track_id)
+        self._direction[new_track_id] = self._direction.pop(old_track_id)
 
     def forget(self, track_id):
         """트랙이 사라졌을 때 호출. 안 지우면 ID가 재사용될 때 옛 방향이 따라붙는다."""

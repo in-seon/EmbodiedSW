@@ -139,6 +139,12 @@ class SignalExtensionPipeline:
         priority_mode = bool(aid_boxes)
 
         confirmed = self.occupancy.update(detections)
+        # occupancy가 재발급된 track_id를 이어붙였으면 진척도에도 같은 이름 변경을 전한다.
+        # **이 한 줄이 빠지면 카운트만 살아남고 진입 방향이 날아간다** — 거의 다 건넌
+        # 사람이 "방금 진입"으로 보고돼 아두이노가 연장을 다시 시작한다(src/zone.py).
+        for old_id, new_id in self.occupancy.rekeyed:
+            self.progress.rekey(old_id, new_id)
+
         occupied = self.occupancy.occupied_zones()
         speeds = self.speed.update_many(detections, timestamp)
 
