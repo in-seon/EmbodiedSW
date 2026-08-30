@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from config import config
 from src.capture import CameraCapture
-from src.detection import MobilityAidDetector, PersonDetector
+from src.detection import PersonDetector
 from src.fall_detection import FallDetectionPipeline, roi_from_ratio, roi_from_zones
 from src.serial_comm import SerialComm
 from src.serial_comm import STATE_FALL, STATE_NORMAL, STATE_ZONE
@@ -68,15 +68,10 @@ class FrameResult:
     eta_sec: object = None
     occupied_zones: list = field(default_factory=list)
     pedestrians: list = field(default_factory=list)  # PedestrianState 목록
-    priority_mode: bool = False
     speed_unit: str = "px/s"         # "cm/s"면 호모그래피 적용됨, "px/s"면 실측 치수 미입력
     # 추적 ID가 붙지 않아 잔류/속도 판정에서 제외한 검출 수. 0이 아닌 값이 계속 나오면
     # 추적이 불안정하다는 뜻이고, 그만큼 연장 조건을 놓치고 있다는 뜻이다.
     untracked_count: int = 0
-    # 보조 모델이 이번 프레임에 본 교통약자 보조기구(휠체어/목발 등) 개수.
-    # priority_mode가 켜졌는데 이 값이 0이면 배선이 잘못된 것이고, 반대로 이 값만
-    # 계속 튀면 보조 모델의 오탐이다 — 둘을 구분할 수 있어야 현장에서 원인을 찾는다.
-    mobility_aid_count: int = 0
 
     def serial_state(self):
         """이 결과를 아두이노로 보낼 (상태, 진척도)로 요약한다.
@@ -91,15 +86,10 @@ class FrameResult:
 
 class SignalExtensionPipeline:
     def __init__(self, camera=None, detector=None, zones=None, occupancy=None,
-                 serial_comm=None, speed_estimator=None, aid_detector=None,
-                 progress=None):
+                 serial_comm=None, speed_estimator=None, progress=None):
         # 인자로 주입하지 않으면 config 기반 기본 객체를 만든다(테스트에선 가짜 객체 주입 가능).
         self.camera = camera or CameraCapture()
         self.detector = detector or PersonDetector()
-        # 교통약자(휠체어/목발) 보조 검출. 사람 검출과 **다른 가중치**를 쓴다 — pose 모델에는
-        # 해당 클래스가 없어서 PersonDetector로는 원리상 못 잡는다(CLAUDE.md 2.5).
-        # config.MOBILITY_AID_MODEL_PATH가 None이면 조용히 비활성되어 항상 빈 목록을 준다.
-        self.aid_detector = aid_detector if aid_detector is not None else MobilityAidDetector()
         self.zones = zones or CrosswalkZones.load()
         self.occupancy = occupancy or CrosswalkOccupancy(self.zones)
         # track별 진입 방향을 래치해 물리 구역을 '진척도'로 바꾼다.
@@ -111,10 +101,9 @@ class SignalExtensionPipeline:
     def process_frame(self, frame, timestamp=None) -> FrameResult:
         """한 프레임을 처리해 이번 프레임의 연장 요구와 보행자 상태를 반환한다."""
         boxes = self.detector.detect(frame)
-        aid_boxes = self.aid_detector.detect(frame)
-        return self.process_boxes(boxes, aid_boxes, timestamp)
+        return self.process_boxes(boxes, timestamp)
 
-    def process_boxes(self, boxes, aid_boxes=(), timestamp=None) -> FrameResult:
+    def process_boxes(self, boxes, timestamp=None) -> FrameResult:
         """이미 검출된 박스로 처리한다 — **추론을 프레임당 한 번만 돌리기 위한 진입점.**
 
         --mode full 에서는 쓰러짐 감지와 신호 연장이 같은 프레임을 본다. 각자
@@ -133,11 +122,6 @@ class SignalExtensionPipeline:
             for box in boxes
             if box.is_pedestrian()
         ]
-        # 교통약자 보조기구 검출 결과. **연장 판단에는 쓰지 않는다.**
-        # 기준표 방식에서는 느린 사람이 기준 대비 지연으로 자동 검출되어 더 연장받으므로,
-        # "휠체어인가"를 따로 알 필요가 없다. 이 값은 화면 표시·발표 자료용 계측이다.
-        priority_mode = bool(aid_boxes)
-
         confirmed = self.occupancy.update(detections)
         # occupancy가 재발급된 track_id를 이어붙였으면 진척도에도 같은 이름 변경을 전한다.
         # **이 한 줄이 빠지면 카운트만 살아남고 진입 방향이 날아간다** — 거의 다 건넌
@@ -185,10 +169,8 @@ class SignalExtensionPipeline:
             eta_sec=eta_sec,
             occupied_zones=occupied,
             pedestrians=pedestrians,
-            priority_mode=priority_mode,
             speed_unit=self.speed.unit,
             untracked_count=self.occupancy.untracked_count,
-            mobility_aid_count=len(aid_boxes),
         )
 
     def run(self, on_result=None):
@@ -371,10 +353,9 @@ class CombinedPipeline:
 
         # ---- 추론 1회 ----
         boxes = self.detector.detect(frame)
-        aid_boxes = self.extension.aid_detector.detect(frame)
 
         fall_result = self.fall.process_boxes(boxes, frame, now)
-        ext_result = self.extension.process_boxes(boxes, aid_boxes, now)
+        ext_result = self.extension.process_boxes(boxes, now)
 
         if fall_result.fall_confirmed:
             state, zone = STATE_FALL, None

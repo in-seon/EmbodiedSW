@@ -65,37 +65,12 @@ class FakeSerial:
         self.states.append((state, zone))
         return state
 
-class FakeAidDetector:
-    """교통약자 보조 모델 대역. 가중치 없이 '보조기구가 보였는가'만 흉내낸다.
-
-    기본값(빈 목록)은 config.MOBILITY_AID_MODEL_PATH가 None일 때의 실제 동작과 같다.
-    """
-
-    def __init__(self, frames=None):
-        self.frames = list(frames) if frames is not None else []
-        self.calls = 0
-
-    def detect(self, frame):
-        if not self.frames:
-            return []
-        boxes = self.frames[min(self.calls, len(self.frames) - 1)]
-        self.calls += 1
-        return boxes
-
-
-def aid_box(label="wheelchair"):
-    """보조 모델이 내는 박스. track_id가 없다(predict()라 추적을 안 붙인다)."""
-    return BoundingBox(x1=0, y1=0, x2=20, y2=40, confidence=0.5, label=label)
-
-
-def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH_CM,
-                   aid_frames=None):
+def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH_CM):
     zones = CrosswalkZones.from_quad(CORNERS, n=5, width_cm=width_cm, length_cm=length_cm)
     plane = GroundPlane.from_quad(CORNERS, width_cm, length_cm)
     return SignalExtensionPipeline(
         camera=object(),
         detector=FakeDetector(frames),
-        aid_detector=FakeAidDetector(aid_frames),
         zones=zones,
         occupancy=CrosswalkOccupancy(zones, confirm_frames=confirm_frames),
         serial_comm=FakeSerial(),
@@ -231,18 +206,6 @@ def test_standing_person_still_reports_progress():
         result = pipeline.process_frame(None, timestamp=t)
     assert result.eta_sec is None
     assert result.progress == 3
-
-
-# --- 교통약자 검출은 계측용으로만 남는다 ---
-
-def test_mobility_aid_is_reported_but_does_not_change_output():
-    """느린 사람은 아두이노가 기준 대비 지연으로 잡는다 — 검출 결과로 값을 바꾸지 않는다."""
-    pipeline = build_pipeline([[box_at(50, 100, 1)]], aid_frames=[[aid_box()]])
-    result = pipeline.process_frame(None, timestamp=0.0)
-
-    assert result.priority_mode is True
-    assert result.mobility_aid_count == 1
-    assert result.progress == 3                 # 값은 그대로
 
 
 # --- 추론 1회 공유 ---

@@ -160,10 +160,9 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 ```
 반복:
   ① frame = camera.read_frame()                        ▸ None이면 루프 종료
-  ② boxes     = detector.detect(frame)                 [추론 1회 — 전체 시간의 99.6%]
-     aid_boxes = aid_detector.detect(frame)            [N프레임마다 1회, 없으면 빈 목록]
+  ② boxes = detector.detect(frame)                     [추론 1회 — 전체 시간의 99.6%]
   ③ fall = fall_pipeline.process_boxes(boxes, frame)   키포인트 → 몸통 각도 → 확정 여부
-  ④ ext  = ext_pipeline.process_boxes(boxes, aid_boxes) 발 위치 → 구역 → 진척도
+  ④ ext  = ext_pipeline.process_boxes(boxes)           발 위치 → 구역 → 진척도
   ⑤ state = FALL if fall.confirmed else ext.serial_state()
   ⑥ serial_comm.update_state(state, 진척도)            ▸ 변화 시 + 1초마다만 실제 전송
 ```
@@ -237,7 +236,6 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 | `.foot_point()` | `((x1+x2)/2, y2)` | **구역 판정·속도의 기준점.** 박스 하단 중앙 = 지면 접점 |
 | `.center_point()` | `((x1+x2)/2, (y1+y2)/2)` | ⚠️ 지면 판정에 쓰지 말 것. 사람 키의 절반만큼 떠 있어 카메라 쪽으로 당겨진다 |
 | `.is_pedestrian()` | bool | `label == config.PEDESTRIAN_LABEL` |
-| `.is_mobility_aid()` | bool | `label in config.MOBILITY_AID_LABELS` ▸ 현재 항상 `False` |
 
 #### `PersonDetector`
 
@@ -245,7 +243,7 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 |---|---|
 | **입력** | `frame` (BGR numpy 배열) |
 | **출력** | `list[BoundingBox]` |
-| **사용 파라미터** | `DETECTION_MODEL_PATH`, `DETECTION_CONFIDENCE_THRESHOLD`, `DETECTION_TRACKER`, `DETECTION_IMGSZ`, `PEDESTRIAN_LABEL`, `MOBILITY_AID_LABELS` |
+| **사용 파라미터** | `DETECTION_MODEL_PATH`, `DETECTION_CONFIDENCE_THRESHOLD`, `DETECTION_TRACKER`, `DETECTION_IMGSZ`, `PEDESTRIAN_LABEL` |
 | **내부 호출** | `model.track(frame, persist=True, conf=..., classes=..., tracker=..., imgsz=..., verbose=False)` |
 
 ▸ `persist=True`이므로 같은 사람에게 프레임 간 같은 `track_id`가 붙는다.
@@ -255,20 +253,11 @@ python main.py --mode fall     # 쓰러짐만 (zone 설정 없이도 돈다)
 zone 좌표·호모그래피가 그대로 유효하다(재캘리브레이션 불필요).
 이것이 `CAMERA_RESOLUTION`을 낮추는 것과 결정적으로 다른 점이다.
 
-#### `MobilityAidDetector` (보류 기능, 파이프라인 미연결)
+#### 교통약자 보조 검출기는 없다
 
-| 항목 | 내용 |
-|---|---|
-| **입력** | `frame` |
-| **출력** | `list[BoundingBox]` (`track_id`는 항상 `None`) |
-| **사용 파라미터** | `MOBILITY_AID_MODEL_PATH`, `_LABELS`, `_EVERY_N_FRAMES`, `_IMGSZ`, `_CONFIDENCE_THRESHOLD` |
-
-▸ `MOBILITY_AID_MODEL_PATH is None` → `enabled=False`, 항상 `[]` 반환 (조용히 비활성)
-▸ `every_n_frames` 마다 1회만 추론, 그 사이 프레임은 **직전 결과 재사용**
-  (추론이 프레임 비용의 전부라 매 프레임 돌리면 FPS 반토막)
-▸ `MOBILITY_AID_LABELS`가 비어 있으면 모델의 **전체 클래스**를 쓴다
-  (후보 가중치의 클래스명을 모를 때 바로 시험 가능)
-⚠️ 지정한 라벨이 모델에 없으면 `ValueError` + 모델이 아는 클래스 목록 출력
+한때 별도 가중치로 휠체어/목발을 잡는 `MobilityAidDetector`가 있었으나 **제거했다.**
+구역 기준표가 정상 보행 속도를 담고 있어서 느린 사람은 기준 대비 지연으로 자동
+검출된다 — "휠체어인가"를 따로 알 필요가 없다(`docs/decisions.md` 2026-08-26).
 
 ---
 
@@ -581,7 +570,7 @@ ID를 그대로 믿으면 낙상 구간만 쏙 빠져 영영 확정되지 않는
 | 도구 | 실행 위치 | 용도 |
 |---|---|---|
 | `zone_calibrator.py` | PC/파이 | 네 꼭짓점 클릭 → `data/zone_config.json`. **가장 먼저 할 일** |
-| `manual_camera_person_check.py` | PC/파이 | **주력 확인 도구.** 검출·구역·속도·ETA·FPS·교통약자 |
+| `manual_camera_person_check.py` | PC/파이 | **주력 확인 도구.** 검출·구역·속도·ETA·FPS·쓰러짐 |
 | `pi_camera_server.py` | 파이 | 프레임을 MJPEG로 송출 (배치 B — PC에서 추론) |
 | `manual_rpicam_person_check.py` | 파이 | Picamera2 경로만 확인 |
 
@@ -591,17 +580,15 @@ ID를 그대로 믿으면 낙상 구간만 쏙 빠져 영영 확정되지 않는
 |---|---|---|
 | 빨간 점 | 사람 발밑 지면에 찍힘 | 박스가 잘리는 중 → 카메라 각도 |
 | 박스 색 | 초록=확정, 노랑=구역 안 미확정, 흰색=구역 밖 | 초록이 깜빡이면 track_id 끊김 |
-| 자주색 박스 | 교통약자 보조 모델 결과 | `--aid-model` 지정 시에만 |
 | 좌상단 `unit` | `cm/s` | `px/s`면 실측 치수 미입력 |
 | 좌상단 `FPS` | — | **이 값이 `ZONE_RESIDENCY_FRAMES`의 근거** |
-| `aid N (xM)` | N=현재 검출, M=누적 추론 횟수 | 주기가 도는지 확인 |
 
 ```powershell
-# 후보 가중치가 우리 모형을 잡는지 사진 한 장으로 검증
-python tools/manual_camera_person_check.py --source 휠체어모형.jpg --aid-model 후보.pt --aid-conf 0.15
+# 헤드리스 FPS 실측 (창을 띄우면 렌더링 비용이 섞여 실제보다 낮게 나온다)
+python tools/manual_camera_person_check.py --source picamera2 --no-display
 
-# 실시간
-python tools/manual_camera_person_check.py --source picamera2 --aid-model 후보.pt --aid-every 10
+# 쓰러짐 임계값 튜닝용 진단 (몸통 각도·키포인트 신뢰도·bbox 비율)
+python tools/manual_camera_person_check.py --source picamera2 --fall
 ```
 
 ---
@@ -638,7 +625,6 @@ python tools/manual_camera_person_check.py --source picamera2 --aid-model 후보
 | 아두이노 스케치 (신호/연장) | 미구현 | 하드웨어 담당 — 계약은 `team_interface.md`에 확정 |
 | `FALL` 수신 시 신호 동작 | 미결정 | 부저만? 차량 적색 유지? 팀 합의 필요 |
 | 텔레그램 신고 | 미구현 | 봇 토큰 보관 방식 + 범위 미결정 |
-| 교통약자 우선 연장 | 값 미정 | `PRIORITY_ZONE_EXTENSION_SEC` (검출 자체는 배선 완료) |
 | `USE_SPEED_FOR_EXTENSION` | 구현됐으나 `False` | 캘리브레이션 + 속도 정확도 실측 |
 | `ZONE_RESIDENCY_FRAMES` | `None` | 파이 실측 FPS (`--confirm-frames`로 임시 우회) |
 

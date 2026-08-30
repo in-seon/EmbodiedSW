@@ -68,6 +68,8 @@ CLAUDE.md 5장: 파라미터를 정할 때 근거를 남겨 대회 발표 자료
 
 - **남긴 것**: `src/speed.py`(속도·ETA)와 `MobilityAidDetector`는 지우지 않았다.
   연장 판단에는 쓰이지 않지만 도구 화면과 발표 자료용 계측으로 계속 쓴다.
+  > **2026-08-30 정정**: `MobilityAidDetector`와 관련 config는 **제거했다.** 계측 가치보다
+  > "이 값을 채워야 하나"라는 미결 항목으로 남는 비용이 컸다. `src/speed.py`는 그대로 둔다.
 
 - **참고**: `tests/test_zone.py`(진척도 8개), `tests/test_signal_extend.py`(9개),
   `tests/test_pipeline.py`(21개). 아두이노 계약은 `docs/team_interface.md`.

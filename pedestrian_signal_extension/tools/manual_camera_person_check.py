@@ -43,7 +43,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config
 from src.capture import CameraCapture
-from src.detection import MobilityAidDetector, PersonDetector
+from src.detection import PersonDetector
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
 
@@ -51,7 +51,6 @@ GREEN = (0, 255, 0)
 YELLOW = (0, 255, 255)
 RED = (0, 0, 255)
 WHITE = (255, 255, 255)
-MAGENTA = (255, 0, 255)   # 교통약자 보조 검출 결과
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -162,14 +161,6 @@ def main():
     parser.add_argument("--confirm-frames", type=int, default=config.ZONE_RESIDENCY_FRAMES or 3,
                         help="'확정 보행자'로 보기까지 필요한 연속 검출 프레임 수. "
                              "config.ZONE_RESIDENCY_FRAMES가 아직 미정이라 화면 확인용 기본값 3을 쓴다.")
-    parser.add_argument("--aid-model", default=config.MOBILITY_AID_MODEL_PATH,
-                        help="교통약자(휠체어/목발) 보조 모델 가중치 경로. "
-                             "주면 자주색 박스로 함께 표시한다. 후보 가중치가 우리 모형을 "
-                             "실제로 잡는지 확인하는 용도.")
-    parser.add_argument("--aid-every", type=int, default=config.MOBILITY_AID_EVERY_N_FRAMES,
-                        help="보조 모델 추론 주기(프레임). 1이면 매 프레임(비쌈).")
-    parser.add_argument("--aid-conf", type=float, default=config.MOBILITY_AID_CONFIDENCE_THRESHOLD,
-                        help="보조 모델 신뢰도 임계값. 모형이 안 잡히면 낮춰가며 확인.")
     args = parser.parse_args()
 
     try:
@@ -184,21 +175,6 @@ def main():
     detector = PersonDetector()
     print(f"[안내] 사람 검출 모델: {detector.model_path} (imgsz={detector.imgsz}, "
           f"conf={detector.confidence_threshold})")
-
-    # 교통약자 보조 모델. 경로가 없으면 enabled=False로 조용히 비활성된다.
-    aid = MobilityAidDetector(model_path=args.aid_model, every_n_frames=max(1, args.aid_every),
-                              confidence_threshold=args.aid_conf)
-    if aid.enabled:
-        print(f"[안내] 교통약자 보조 모델: {aid.model_path} "
-              f"({args.aid_every}프레임마다 1회, imgsz={aid.imgsz}, conf={aid.confidence_threshold})")
-        print(f"       이 모델이 아는 클래스: {aid.class_names}")
-        print("       * 자주색 박스가 보조 모델 결과다. 휠체어/목발 모형을 화면에 넣고 "
-              "잡히는지 확인할 것.")
-        if not config.MOBILITY_AID_LABELS:
-            print("       * config.MOBILITY_AID_LABELS가 비어 있어 모델의 모든 클래스를 표시한다. "
-                  "쓸 클래스명을 확인한 뒤 config에 채우면 된다.")
-    else:
-        print("[안내] 교통약자 보조 모델 없음 (--aid-model 또는 config.MOBILITY_AID_MODEL_PATH로 지정).")
 
     # 카메라 여는 로직은 src/capture.py 한 곳에 있다.
     # 파이 CSI 카메라는 --source picamera2, 그 외(USB 웹캠/영상/스트림)는 cv2가 처리한다.
@@ -228,20 +204,11 @@ def main():
             boxes = [b for b in detector.detect(frame) if b.is_pedestrian()]
             detections = [(b.track_id, b.foot_point()) for b in boxes]
 
-            # 교통약자 보조 검출 (저빈도). 비활성이면 빈 목록.
-            aid_boxes = aid.detect(frame)
-
             confirmed = occupancy.update(detections) if occupancy else {}
             speeds = speed.update_many(detections, now)
 
             if show and zones is not None:
                 _draw_zones(frame, zones)
-
-            if show:
-                for ab in aid_boxes:
-                    cv2.rectangle(frame, (int(ab.x1), int(ab.y1)), (int(ab.x2), int(ab.y2)), MAGENTA, 2)
-                    cv2.putText(frame, f"{ab.label} {ab.confidence:.2f}",
-                                (int(ab.x1), max(int(ab.y1) - 6, 12)), FONT, 0.5, MAGENTA, 2)
 
             # 사람별 측정값은 화면 표시 여부와 무관하게 만든다. 헤드리스에서는 이 문자열을
             # 그대로 stdout으로 내보내므로, 창으로 보는 것과 같은 값을 보게 된다.
@@ -288,8 +255,6 @@ def main():
                 fps_t0, fps_frames = now, 0
             # 라즈베리파이 실측 FPS는 이 값으로 확인한다 (CLAUDE.md 2.6 — 추정치 기록 금지).
             hud = f"FPS {fps:.1f} | {camera.backend_name} | unit {speed.unit}"
-            if aid.enabled:
-                hud += f" | aid {len(aid_boxes)} (x{aid.inference_count})"
 
             if not show:
                 # 1초에 한 번만 찍는다. 매 프레임 출력하면 그 자체가 루프를 느리게 만들어
@@ -301,14 +266,9 @@ def main():
                     print(summary, flush=True)
                     for line in person_lines:
                         print(f"    {line}", flush=True)
-                    if aid_boxes:
-                        print("    PRIORITY (mobility aid detected)", flush=True)
                 continue
 
             cv2.putText(frame, hud, (10, 22), FONT, 0.6, WHITE, 2)
-            if aid_boxes:
-                cv2.putText(frame, "PRIORITY (mobility aid detected)", (10, 44),
-                            FONT, 0.6, MAGENTA, 2)
 
             cv2.imshow("Detection + Zone + Speed (q: quit)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
