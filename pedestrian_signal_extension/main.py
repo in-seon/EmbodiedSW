@@ -1,47 +1,3 @@
-"""실행 진입점.
-
-    python main.py                 # 전체: 구역 기반 신호 연장 + 쓰러짐 감지 (기본값)
-    python main.py --mode fall     # 쓰러짐 감지만 (zone 캘리브레이션 없이)
-
-## 파이가 하는 일 / 아두이노가 하는 일
-
-    파이   : 구역 판정, 잔류 확정, 쓰러짐 확정  -> 아래 세 상태로 요약해 전송
-    아두이노: 잔여 녹색 시간, 임계값 판단, 누적 상한, 사이클 리셋, 부저/LED/7세그먼트
-
-        normal         횡단보도에 확정 보행자가 없음
-        zone<1..5>     가장 덜 건넌 사람의 **진척도**(1=방금 진입, 5=거의 다 건넘)
-        fall           쓰러짐 확정
-
-    (소문자, zone 뒤 숫자는 붙여 쓴다: `zone2`)
-
-"남은 시간이 5초 미만인가"는 7세그먼트를 직접 세는 아두이노만 답할 수 있고, "이 사람이
-몇 번 구역에 있나"는 영상을 보는 파이만 답할 수 있다. 각자 자기만 아는 것을 판단한다.
-전체 계약은 docs/team_interface.md 참고.
-
-## 모드
-
-    --mode full   전체: 구역 기반 신호 연장 + 쓰러짐 감지 (기본값, zone 설정 필요)
-    --mode fall   쓰러짐 감지만. zone 캘리브레이션 없이 돌아가므로 카메라만 놓고
-                  바로 확인할 때 쓴다.
-
-## 옵션
-
-    --source      카메라 소스. 생략하면 config.CAMERA_SOURCE
-    --port        시리얼 포트. 생략하면 자동 탐색
-    --display     창을 띄운다 (모니터 없으면 쓰지 말 것). q=종료, r=알람 해제
-    --no-serial   아두이노 없이 판정만 확인
-
-## 모형 구동은 여기서 하지 않는다
-
-모형 보행자를 움직이는 모터와 쓰러뜨리는 서보는 **별도 보드**가 맡는다. 파이는
-카메라로 보고 판단해서 상태를 흘려보내는 일만 한다 — 시리얼도 한 방향이다.
-
-## 부분만 확인하고 싶을 때
-
-    tools/manual_camera_person_check.py   # 시리얼 없이 비전만 (검출·구역·속도·FPS·--fall)
-    tools/manual_buzzer_check.py          # 카메라 없이 시리얼만
-"""
-
 import argparse
 import sys
 import time
@@ -51,12 +7,7 @@ from config import config
 
 
 class _NullSerial:
-    """--no-serial 용. SerialComm 자리에 들어가 아무것도 보내지 않는다.
-
-    파이프라인이 시리얼에 기대하는 표면 전체를 흉내내야 한다 — 하나라도 빠지면
-    --no-serial 이 AttributeError로 죽는다.
-    """
-
+   
     ready = True
     port = "(없음)"
 
@@ -96,14 +47,7 @@ def _make_serial(args):
 
 
 def _load_zones(required: bool):
-    """zone 설정을 읽는다.
 
-    required=False(쓰러짐만)면 **어떤 이유로든** 못 읽어도 None을 돌려주고 계속한다.
-    쓰러짐 감지에 zone은 ROI 정확도를 높여주는 선택지일 뿐이라, 신호 연장 쪽 설정 문제로
-    쓰러짐까지 못 돌게 만들 이유가 없다.
-
-    required=True(신호 연장)면 그대로 실패시킨다. zone이 없으면 구역 판정 자체가 불가능하다.
-    """
     from src.zone import CrosswalkZones
 
     if required:
@@ -322,8 +266,6 @@ def main():
     if args.source is None:
         args.source = config.CAMERA_SOURCE
 
-    # argparse는 --source 0 을 문자열 "0"으로 준다. 그대로 넘기면 cv2가 0번 카메라가 아니라
-    # "0"이라는 파일을 열려고 해서 무조건 실패한다(src/capture.py의 normalize_source 참고).
     from src.capture import normalize_source
     args.source = normalize_source(args.source)
 

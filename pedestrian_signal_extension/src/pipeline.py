@@ -1,34 +1,3 @@
-"""전체 파이프라인: 카메라 -> YOLO 검출 -> 판정 -> 아두이노로 상태 전송.
-
-세 가지 파이프라인이 있다.
-
-    SignalExtensionPipeline  구역 판정 + 속도 -> 연장 요구(zone/normal)
-    FallAlarmPipeline        쓰러짐 판정      -> fall/normal
-    CombinedPipeline         위 둘을 **추론 1회로** 돌리고 상태를 하나로 합침 (--mode full)
-
-흐름:
-
-    프레임
-      -> PersonDetector.detect()            yolov8n-pose, track_id + 키포인트
-      ├-> box.foot_point() -> CrosswalkZones.locate() -> CrosswalkOccupancy
-      │       -> CrossingProgress -> minimum_progress()  가장 덜 건넌 사람
-      ├-> SpeedEstimator.update_many()      평면 좌표 변화율 -> 속도/ETA
-      └-> FallDetectionPipeline.update()    키포인트 -> 몸통 각도 -> 쓰러짐 확정
-      -> SerialComm.update_state()          normal / zone<진척도> / fall
-
-## '언제 연장할까'는 여기 없다
-
-잔여 녹색 시간·임계값 판단·누적 상한·사이클 리셋은 **제어부(아두이노)가 소유한다.**
-파이는 "무엇을 보았는가"만 요약해 보낸다. 이유와 아두이노 쪽 계약은
-docs/team_interface.md, 결정 경위는 docs/decisions.md 2026-08-26 항목 참고.
-
-## 추론은 프레임당 한 번뿐이어야 한다
-
-실측상 추론이 프레임 시간의 99.6%다(82.4ms vs 나머지 0.35ms). 두 판정이 각자
-detect()를 부르면 FPS가 그대로 반토막 나므로, CombinedPipeline이 한 번 검출한 결과를
-process_boxes()로 양쪽에 나눠 준다.
-"""
-
 import time
 from dataclasses import dataclass, field
 
@@ -198,22 +167,7 @@ class FallAlarmResult:
 
 
 class FallAlarmPipeline:
-    """목표 2 전용 파이프라인: 카메라 -> 검출 -> 쓰러짐 판정 -> 부저(아두이노).
-
-    SignalExtensionPipeline과 나눠 둔 이유는 **의존하는 것이 다르기 때문**이다.
-    신호 연장은 제어부가 잔여 녹색 시간과 사이클 시작을 알려줘야 판단할 수 있는데
-    그 메시지가 아직 팀 합의 전이라 동작하지 못한다. 반면 쓰러짐 알람은 파이 쪽에서
-    완결된다 — 카메라와 부저만 있으면 되고, 필요한 조각이 전부 이미 있다.
-
-    둘을 한 클래스에 넣으면 합의되지 않은 쪽 때문에 도는 쪽까지 못 돌게 된다.
-    제어부 프로토콜이 확정되면 SignalExtensionPipeline과 나란히 돌리면 된다
-    (검출기를 공유해 추론을 한 번만 하는 형태가 될 것이다).
-
-    ROI(어디까지를 '횡단보도 위'로 볼 것인가)는 두 경로가 있다:
-      - zones가 있으면 캘리브레이션된 네 꼭짓점을 감싸는 사각형(roi_from_zones) — 권장
-      - 없으면 화면 비율(FALL_CONFIG["crosswalk_roi"]) — 눈대중이라 부정확하다
-    """
-
+    
     def __init__(self, camera=None, detector=None, serial_comm=None,
                  zones=None, roi_px=None, fall_detector=None):
         self.camera = camera or CameraCapture()
@@ -301,34 +255,8 @@ class CombinedResult:
 
 
 class CombinedPipeline:
-    """목표 1 + 2를 한 루프에서 돌린다 (--mode full).
-
-    ## 추론은 프레임당 한 번뿐이다
-
-    이것이 이 클래스의 존재 이유다. 두 파이프라인을 각각 run() 하면 같은 프레임에
-    YOLO가 두 번 돌고, 추론이 프레임 시간의 99.6%라 FPS가 그대로 반토막 난다.
-    여기서 한 번 검출해 두 쪽에 나눠 준다(process_boxes).
-
+  
     ## 상태 우선순위: fall > zone > normal
-
-    시리얼 채널이 하나이고 상태도 하나다. 쓰러진 사람이 있으면 연장 요구보다 그쪽이
-    급하므로 fall이 이긴다. 쓰러짐이 풀리면 그 프레임의 연장 요구가 다시 나간다.
-
-    쓰러짐 중에 연장을 못 보내는 것이 손해처럼 보이지만, 쓰러진 사람은 애초에
-    연장으로 해결되는 상황이 아니다(스스로 못 건넌다). 제어부가 fall을 받으면
-    사이렌과 함께 차량 신호를 어떻게 할지 결정한다 — docs/team_interface.md 참고.
-
-    ## ⚠️ 쓰러짐 해제는 normal이 아니라 '상태가 FALL에서 벗어남'으로 표현된다
-
-    일어난 사람이 횡단보도에 그대로 있으면 여전히 확정 보행자이므로 곧바로 ZONE이 나간다:
-
-        zone1 -> zone3 -> fall -> zone4        <- normal이 끼지 않는다
-
-    그래서 아두이노는 **`부저 = (마지막 상태 == fall)`** 로 짜야 한다. "normal을 받아야
-    끈다"로 짜면 이 구간에서 부저가 영영 울린다. normal은 "쓰러짐 해제"가 아니라
-    **"확정 보행자 없음"**이다.
-
-    """
 
     def __init__(self, camera=None, detector=None, serial_comm=None,
                  extension=None, fall=None, zones=None):
@@ -337,8 +265,6 @@ class CombinedPipeline:
         self.serial_comm = serial_comm or SerialComm()
         zones = zones if zones is not None else CrosswalkZones.load()
 
-        # 두 파이프라인에 **같은 시리얼 객체**를 주되, 상태 전송은 여기서 한 번만 한다.
-        # 각자 보내면 같은 프레임에 NORMAL과 EXTEND가 번갈아 나가 서로를 덮어쓴다.
         self.extension = extension or SignalExtensionPipeline(
             camera=self.camera, detector=self.detector,
             serial_comm=_NoSend(), zones=zones,
@@ -381,13 +307,7 @@ class CombinedPipeline:
 
 
 class _NoSend:
-    """CombinedPipeline이 하위 파이프라인에 끼워 넣는 '전송하지 않는' 시리얼.
-
-    두 파이프라인은 각자 상태를 보내도록 만들어져 있지만, 합쳐 돌릴 때는 상태가
-    하나여야 한다. 하위 쪽 전송을 막아 두고 CombinedPipeline이 우선순위를 정해
-    한 번만 보낸다.
-    """
-
+    
     def update_state(self, state, extend_sec=None, now=None):
         return None
 

@@ -1,19 +1,3 @@
-"""Zone(횡단보도 ROI) 정의 + 5구역 위치 판정 + 잔류/점유 추적.
-
-CLAUDE.md 2.2: 횡단보도를 걷는 방향을 따라 위치 순서대로 5개 구역(1~5)으로 나누고,
-보행자가 어느 구역에 있는지에 따라 신호 연장 시간을 차등한다(config.ZONE_EXTENSION_SEC).
-연장 시간 결정은 signal_extend 모듈이 담당하고, 여기서는 "누가 몇 번 구역에 있는지"까지만 만든다.
-
-판정 기준점은 bounding box 하단 모서리의 중심(BoundingBox.foot_point)이다. 카메라가 사선으로
-비추므로 박스 중심점은 사람 키만큼 떠 있어 실제 서 있는 지점보다 카메라 쪽으로 당겨져 보인다
-(CLAUDE.md 2.1).
-
-구역 판정은 픽셀 좌표계의 폴리곤 포함 여부만으로 하며 실거리 변환이 필요 없다. 실거리가 필요한
-속도 추정은 별도 모듈(ground_plane.py + speed.py)이 맡는다. 다만 둘 다 같은 네 꼭짓점에서
-출발하므로, 여기서 zone 설정을 읽을 때 GroundPlane도 같이 만들어 `ground_plane` 속성으로 들고
-있는다(설정 파일을 두 번 읽지 않기 위함). 실측 치수가 없으면 None이고, 그래도 구역 판정은 정상 동작한다.
-"""
-
 import json
 
 from config import config
@@ -114,15 +98,7 @@ class CrosswalkZones:
 
     @staticmethod
     def _check_frame_size(data, expected_frame_size):
-        """캘리브레이션 당시 해상도와 운영 해상도가 같은지 확인한다.
-
-        zone 좌표와 호모그래피는 둘 다 '캘리브레이션 당시 프레임 해상도'에 종속된 픽셀 값이다.
-        운영 해상도가 다르면 좌표가 통째로 어긋나는데, **에러 없이 구역만 엉뚱하게 잡히는**
-        조용한 오작동이라 현장에서 원인을 찾기가 가장 어렵다. zone_calibrator가 frame_size를
-        남겨 두므로, 읽는 쪽에서 비교해 즉시 실패시킨다.
-
-        frame_size가 없는 옛 설정 파일은 검증할 근거가 없으므로 통과시킨다(재캘리브레이션 권장).
-        """
+       
         saved = data.get("frame_size")
         if saved is None or expected_frame_size is None:
             return
@@ -171,29 +147,7 @@ class CrosswalkZones:
 
 
 class CrosswalkOccupancy:
-    """트랙(사람 ID)별로 현재 위치한 구역을 추적한다.
-
-    검출 흔들림에 대비해, 횡단보도(아무 구역) 안에서 confirm_frames 이상 연속 검출돼야
-    '확정 보행자'로 본다. 트랙 ID 부여(추적/재식별)는 검출 파이프라인 책임이며 여기선 받기만 한다.
-
-    ## 미검출 유예 (grace_frames)
-
-    YOLO는 가림·모션블러·저조도에서 한두 프레임씩 사람을 놓치는 것이 정상이다. 그때마다
-    카운트를 0으로 되돌리면 확정 보행자가 좀처럼 나오지 않고, **에러 없이 조용히 연장만
-    빠진다.** 그래서 grace_frames 프레임까지의 미검출은 상태를 지우지 않고 넘어간다.
-
-    유예 동안 카운트는 **동결**된다 — 안 보이는 동안은 잔류의 증거가 없으므로 올려주지 않되,
-    이미 쌓은 것을 뺏지도 않는다. 구역 번호는 마지막으로 본 값을 유지한다.
-
-    단, **'구역 밖으로 나감'은 유예 대상이 아니다**(즉시 리셋). "안 보임"은 정보가 없는
-    상태지만 "밖으로 나감"은 확실한 정보다. 둘을 같이 취급하면 이미 횡단보도를 벗어난
-    사람 때문에 차를 세우게 된다.
-
-    유예 단위가 '초'가 아니라 '프레임 수'인 이유는 확정 기준(confirm_frames)이 프레임 수라
-    같은 단위여야 섞이지 않기 때문이다. FallTracker가 '초 + 프레임 배수' 적응형을 쓰는 것은
-    그쪽 누적(fall_confirm_sec)이 시간 기준이라서다 — config.TRACK_GRACE_FRAMES 주석 참고.
-    """
-
+   
     def __init__(self, crosswalk_zones: CrosswalkZones, confirm_frames=None,
                  grace_frames=None, inherit_distance=None):
         self.zones = crosswalk_zones
@@ -230,18 +184,7 @@ class CrosswalkOccupancy:
         self.rekeyed = []
 
     def update(self, detections) -> dict:
-        """이번 프레임 검출을 반영하고, 확정 보행자의 {track_id: zone_index} 를 반환한다.
-
-        detections: (track_id, point) 튜플의 iterable. point는 보통 BoundingBox.foot_point().
-
-        track_id가 None인 검출은 무시한다(SpeedEstimator.update_many와 같은 규칙). 프레임 간
-        대응을 알 수 없는 검출로는 '연속 몇 프레임 잔류했는가'를 셀 수 없기 때문이다. None을
-        키로 쓰면 서로 다른 사람들이 한 카운터에 합쳐져, 같은 프레임 안의 여러 명이 각각
-        카운트를 올리고 마지막 사람의 구역만 남는다 — 잔류 검증이 통째로 무력화된다.
-
-        무시한 개수는 untracked_count로 노출한다. 조용히 놓치면 실측에서 "왜 확정이 안 되지"의
-        원인을 찾을 수 없으므로, 추적이 자주 끊기고 있다는 사실이 보이게 한다.
-        """
+        
         seen = set()
         self.untracked_count = 0
         self.rekeyed = []
@@ -282,12 +225,7 @@ class CrosswalkOccupancy:
         return self.confirmed()
 
     def _distance(self, a, b) -> float:
-        """두 발 위치의 거리. 호모그래피가 있으면 cm, 없으면 px.
-
-        cm로 재는 이유: 픽셀 거리는 원근 때문에 **화면 위쪽(먼 곳)에서 훨씬 작게** 나온다.
-        같은 임계값이 가까운 쪽에서는 빡빡하고 먼 쪽에서는 헐거워져, 하필 검출이 불안정한
-        먼 쪽에서 남남을 이어붙인다. 구역을 실거리로 등분하는 것과 같은 이유다.
-        """
+       
         plane = self.zones.ground_plane
         if plane is not None:
             a, b = plane.to_ground(a), plane.to_ground(b)
@@ -364,37 +302,7 @@ class CrosswalkOccupancy:
 
 
 class CrossingProgress:
-    """track_id별 '얼마나 건넜는가'(진척도 1..N)를 낸다.
-
-    ## 왜 물리 구역 번호를 그대로 쓸 수 없는가
-
-    구역 번호는 **좌표계 기준**이라 진입 방향에 따라 의미가 뒤집힌다. 물리적으로 같은
-    2번 구역에 있어도, 1번에서 들어온 사람은 대부분 남았고 5번에서 온 사람은 거의 다
-    건넜다. 같은 번호를 보내면 아두이노가 둘을 구분할 수 없다.
-
-    그래서 사람마다 **자기 진입점 기준으로** 번호를 다시 매긴다:
-
-        진척도 1 = 방금 진입      진척도 N = 거의 다 건넘
-
-    ## 방향을 어떻게 아는가 — 속도를 쓰지 않는다
-
-    **첫 검출 구역**으로 판별한다. 중앙보다 앞쪽에서 처음 보였으면 정방향, 뒤쪽이면
-    역방향이다. 속도 추정과 달리 프레임률 요구가 없고(위치 이력만 보면 된다), 사람이
-    멈춰 있어도 판별이 유지된다.
-
-    중앙에서 처음 보이면 방향을 알 수 없다(track_id 재발급 등). 그때는 **중앙값으로
-    간주**하고, 이후 구역이 바뀌면 그 방향으로 확정한다. 3번에서 시작해 4번으로 가면
-    정방향이 확정되어 진척도도 4가 되고, 2번으로 가면 역방향이 확정되어 진척도가
-    6-2=4가 된다 — 어느 쪽이든 "중앙에서 한 칸 더 갔다"로 수렴한다.
-
-    ## 오판하면 어느 쪽으로 틀리는가
-
-    첫 검출이 실제 진입점이 아니면(중간에 ID가 재발급되면) 방향을 반대로 볼 수 있다.
-    그때 진척도는 **실제보다 작게** 나오고, 작은 진척도는 곧 '덜 왔다'이므로 아두이노가
-    **더 연장하는** 쪽으로 틀린다. 보행자가 도로에 갇히는 것보다 차가 조금 더 기다리는
-    것이 낫다는 이 프로젝트의 기존 판단과 같은 방향의 오차다.
-    """
-
+    
     def __init__(self, zone_count=None):
         self.zone_count = zone_count or config.CROSSWALK_ZONE_COUNT
         # track_id -> +1(정방향) / -1(역방향) / None(아직 모름)

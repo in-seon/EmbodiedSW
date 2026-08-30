@@ -1,22 +1,3 @@
-"""보행자 속도 추정 (CLAUDE.md 2.3).
-
-bounding box 하단 모서리 중심(=발 위치)이 시간에 따라 어디로 옮겨가는지로 보행 속도를 낸다.
-
-핵심 두 가지:
-
-1. **평면 좌표로 바꾼 뒤에 잰다.** 사선 카메라의 픽셀 변위는 화면 위/아래 위치에 따라
-   같은 실거리가 다른 픽셀 수로 나타나므로 그대로 쓰면 안 된다. GroundPlane(호모그래피)으로
-   cm 좌표로 편 다음 재야 의미가 있다. GroundPlane이 없으면(치수 미실측) px/s로 떨어지고,
-   그 사실을 TrackSpeed.unit 으로 명시한다 — cm인 척 변환하지 않는다.
-
-2. **한 프레임 차분을 쓰지 않는다.** 검출 박스는 프레임마다 몇 픽셀씩 흔들리는데,
-   dt가 짧으면 그 지터가 속도로 증폭된다(예: 30fps에서 3px 지터 -> 90px/s). 그래서 최근
-   config.SPEED_WINDOW_SEC 구간의 양 끝 샘플로 변위를 잰다.
-
-시각(timestamp)은 인자로 주입받는다. 실시간에서는 time.monotonic()을, 테스트에서는 원하는 값을
-넣어 카메라 없이 검증할 수 있다.
-"""
-
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -42,22 +23,10 @@ class TrackSpeed:
 
 
 class SpeedEstimator:
-    """트랙 ID별로 발 위치 히스토리를 유지하며 속도를 추정한다.
-
-    트랙 ID 부여는 검출기(YOLO.track) 책임이며 여기선 받기만 한다. ID가 None인 검출은
-    프레임 간 대응을 알 수 없으므로 무시한다(속도를 낼 근거가 없다).
-    """
-
+    
     def __init__(self, ground_plane=None, window_sec=None, min_samples=None, grace_frames=None,
                  stopped_threshold=None):
-        """ground_plane: GroundPlane 또는 None.
 
-        None이면 픽셀 좌표 그대로 계산하고 unit="px/s"로 표시한다.
-        (횡단보도 실측 치수 CROSSWALK_REAL_*_CM 가 config에 없을 때의 동작.)
-
-        grace_frames: 이만큼의 연속 미검출까지는 히스토리를 버리지 않는다
-        (config.TRACK_GRACE_FRAMES). 0이면 유예 없음.
-        """
         self.ground_plane = ground_plane
         self.window_sec = window_sec if window_sec is not None else config.SPEED_WINDOW_SEC
         self.min_samples = min_samples if min_samples is not None else config.SPEED_MIN_SAMPLES
@@ -153,20 +122,7 @@ class SpeedEstimator:
         return result
 
     def update_many(self, detections, timestamp) -> dict:
-        """여러 트랙을 한 번에 갱신한다.
-
-        detections: (track_id, foot_point) 튜플의 iterable.
-        반환: {track_id: TrackSpeed} — 아직 속도를 못 낸 트랙은 빠진다.
-
-        이번 프레임에 보이지 않은 트랙의 히스토리는 **유예(grace_frames)를 넘겼을 때** 지운다.
-        사라졌다가 같은 ID로 다시 나타나면 그 공백을 가로질러 변위를 재게 되는데, 그러면
-        실제보다 훨씬 느린 속도가 나오고(끊긴 구간을 계속 이동한 것으로 치므로), 느린 속도는
-        곧 과대한 ETA -> 불필요한 연장이 된다.
-
-        다만 한두 프레임 깜빡임까지 지우면 다시 window_sec만큼 샘플을 쌓아야 하고, 그동안
-        ETA가 None이 되어 속도 기반 연장이 조용히 꺼진다. 그래서 유예 안에서는 히스토리를
-        그대로 두고 직전 속도(latest)도 유지한다. CrosswalkOccupancy가 같은 규칙을 쓴다.
-        """
+        
         seen = set()
         results = {}
         for track_id, foot_point in detections:
@@ -195,18 +151,7 @@ class SpeedEstimator:
         return self._latest.get(track_id)
 
     def estimated_crossing_time_sec(self, track_id) -> Optional[float]:
-        """진행 방향 기준으로 횡단보도를 다 건너기까지 남은 예상 시간(초).
-
-        다음 경우에 None을 반환한다.
-          - 호모그래피가 없음 (px 단위라 실시간으로 환산 불가)
-          - 아직 속도가 계산되지 않음
-          - 진행 방향을 판별할 수 없음(정지)
-          - crossing_speed가 config.SPEED_STOPPED_THRESHOLD_CM_S 미만 (사실상 정지)
-
-        마지막 조건이 중요하다. `> 0` 으로만 거르면 서 있는 사람의 부동소수점 오차가
-        거대한 ETA로 증폭된다(실측 관측: ETA=10351225.3s). 그 값이 아두이노로 나가면
-        엉뚱한 부족분이 계산되므로, 걷는다고 보기 어려운 속도는 아예 ETA를 내지 않는다.
-        """
+        
         if self.ground_plane is None:
             return None
         result = self._latest.get(track_id)
