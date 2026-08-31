@@ -27,11 +27,8 @@
 사용:
 
     python tools/manual_fall_debug.py                      # config 기본 카메라
-    python tools/manual_fall_debug.py --source 0           # PC 웹캠
-    python tools/manual_fall_debug.py --source 쓰러짐.jpg   # 사진 한 장 (가장 빠른 확인)
     python tools/manual_fall_debug.py --source test.mp4 --display
 
-시리얼은 건드리지 않는다 — 부저 없이 판정만 본다.
 """
 
 import argparse
@@ -53,14 +50,12 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def _kp_conf(kp, idx):
-    """해당 관절들의 최소 신뢰도 (torso_angle_deg가 0.3으로 자르는 그 값)."""
     if kp is None:
         return None
     return float(min(kp[i][2] for i in idx))
 
 
 def _describe(person, cfg, roi_px):
-    """사람 한 명의 판정 근거를 여러 줄로."""
     x1, y1, x2, y2 = person.bbox
     w, h = x2 - x1, y2 - y1
     ratio = (w / h) if h > 0 else 0.0
@@ -105,14 +100,12 @@ def _draw(frame, result, roi_px, cfg):
                                           else f"wh={(x2-x1)/max(1,y2-y1):.2f}")
         cv2.putText(frame, tag, (x1, max(14, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        # 몸통 축 — 각도가 어디서 나온 값인지 눈으로 확인할 수 있게
         kp = person.keypoints
         if kp is not None and ang is not None:
             sh = tuple(int(v) for v in kp[[5, 6]][:, :2].mean(axis=0))
             hip = tuple(int(v) for v in kp[[11, 12]][:, :2].mean(axis=0))
             cv2.line(frame, sh, hip, color, 2)
 
-    # cv2.putText는 한글을 못 그린다(??? 로 나온다) — 화면 문구는 ASCII로 둔다.
     head = ("!! FALL !!" if result["fall_confirmed"] else "OK") + \
            f"  people={len(result['people'])}"
     cv2.putText(frame, head, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
