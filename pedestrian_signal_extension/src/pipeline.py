@@ -14,40 +14,25 @@ from src.zone import CrosswalkOccupancy, CrossingProgress, CrosswalkZones
 
 @dataclass
 class PedestrianState:
-    """한 프레임 시점에서 본 보행자 한 명의 상태 (화면 표시·로깅용)."""
-
     track_id: object
     foot_point: tuple
-    zone: object = None              # 물리 구역 1..N 또는 None(횡단보도 밖)
-    progress: object = None          # 진입 방향으로 보정한 진척도 1..N
-    direction: object = None         # +1 / -1 / None(미정)
-    confirmed: bool = False          # ZONE_RESIDENCY_FRAMES를 채워 '확정 보행자'가 됐는지
-    speed: object = None             # TrackSpeed 또는 None(아직 샘플 부족)
-    crossing_time_sec: object = None # 예상 통과 시간(초) 또는 None
-
+    zone: object = None             
+    progress: object = None          
+    direction: object = None         
+    confirmed: bool = False         
+    speed: object = None             
+    crossing_time_sec: object = None 
 
 @dataclass
 class FrameResult:
-    """process_frame 한 번의 결과."""
-
-    # 확정 보행자 중 **가장 덜 건넌 사람의 진척도**(1..N). 아무도 없으면 None.
-    # 물리 구역 번호가 아니라 진입 방향으로 보정된 값이다 — src/zone.py CrossingProgress 참고.
     progress: object = None
-    # 실측 ETA (화면 표시·진단용, **전송하지 않는다**). 연장 판단은 ETA 없이 돌아간다.
     eta_sec: object = None
     occupied_zones: list = field(default_factory=list)
-    pedestrians: list = field(default_factory=list)  # PedestrianState 목록
-    speed_unit: str = "px/s"         # "cm/s"면 호모그래피 적용됨, "px/s"면 실측 치수 미입력
-    # 추적 ID가 붙지 않아 잔류/속도 판정에서 제외한 검출 수. 0이 아닌 값이 계속 나오면
-    # 추적이 불안정하다는 뜻이고, 그만큼 연장 조건을 놓치고 있다는 뜻이다.
+    pedestrians: list = field(default_factory=list)  
+    speed_unit: str = "px/s"       
     untracked_count: int = 0
 
     def serial_state(self):
-        """이 결과를 아두이노로 보낼 (상태, 진척도)로 요약한다.
-
-        확정 보행자가 없으면 NORMAL이다. 쓰러짐은 이 결과에 들어 있지 않으므로 여기서
-        판단하지 않는다 — CombinedPipeline이 FALL로 덮어쓴다.
-        """
         if self.progress is not None:
             return STATE_ZONE, self.progress
         return STATE_NORMAL, None
@@ -56,53 +41,35 @@ class FrameResult:
 class SignalExtensionPipeline:
     def __init__(self, camera=None, detector=None, zones=None, occupancy=None,
                  serial_comm=None, speed_estimator=None, progress=None):
-        # 인자로 주입하지 않으면 config 기반 기본 객체를 만든다(테스트에선 가짜 객체 주입 가능).
+
         self.camera = camera or CameraCapture()
         self.detector = detector or PersonDetector()
         self.zones = zones or CrosswalkZones.load()
         self.occupancy = occupancy or CrosswalkOccupancy(self.zones)
-        # track별 진입 방향을 래치해 물리 구역을 '진척도'로 바꾼다.
         self.progress = progress or CrossingProgress(zone_count=len(self.zones))
         self.serial_comm = serial_comm or SerialComm()
-        # 호모그래피는 zone 설정에서 함께 만들어진다. 실측 치수가 없으면 None -> 속도가 px/s로 나온다.
         self.speed = speed_estimator or SpeedEstimator(ground_plane=self.zones.ground_plane)
 
     def process_frame(self, frame, timestamp=None) -> FrameResult:
-        """한 프레임을 처리해 이번 프레임의 연장 요구와 보행자 상태를 반환한다."""
         boxes = self.detector.detect(frame)
         return self.process_boxes(boxes, timestamp)
 
     def process_boxes(self, boxes, timestamp=None) -> FrameResult:
-        """이미 검출된 박스로 처리한다 — **추론을 프레임당 한 번만 돌리기 위한 진입점.**
-
-        --mode full 에서는 쓰러짐 감지와 신호 연장이 같은 프레임을 본다. 각자
-        detector.detect()를 부르면 추론이 2배가 되고, 추론이 프레임 시간의 99.6%라
-        FPS가 그대로 반토막 난다(포즈 모델을 고른 이유가 무너진다). 그래서 호출자가
-        한 번 검출해 결과를 나눠 준다.
-
-        timestamp: 속도 계산용 시각(초). 생략하면 time.monotonic().
-        """
         if timestamp is None:
             timestamp = time.monotonic()
 
-        # 사람만 골라 (track_id, 발 위치) 목록을 만든다.
         detections = [
             (box.track_id, box.foot_point())
             for box in boxes
             if box.is_pedestrian()
         ]
         confirmed = self.occupancy.update(detections)
-        # occupancy가 재발급된 track_id를 이어붙였으면 진척도에도 같은 이름 변경을 전한다.
-        # **이 한 줄이 빠지면 카운트만 살아남고 진입 방향이 날아간다** — 거의 다 건넌
-        # 사람이 "방금 진입"으로 보고돼 아두이노가 연장을 다시 시작한다(src/zone.py).
         for old_id, new_id in self.occupancy.rekeyed:
             self.progress.rekey(old_id, new_id)
 
         occupied = self.occupancy.occupied_zones()
         speeds = self.speed.update_many(detections, timestamp)
 
-        # 물리 구역 -> 진척도. 확정 보행자만 진척도를 갱신한다(잔류 확정 전에는 방향을
-        # 래치하지 않는다 — 스쳐가는 오검출로 방향이 잘못 굳는 것을 막는다).
         progresses = {}
         for track_id, zone in confirmed.items():
             progresses[track_id] = self.progress.update(track_id, zone)
@@ -122,16 +89,13 @@ class SignalExtensionPipeline:
             for track_id, foot_point in detections
         ]
 
-        # 진척도와 (계측용) ETA를 실어 보낸다.
         occupants = [
             Occupant(progress=value,
                      eta_sec=self.speed.estimated_crossing_time_sec(track_id))
             for track_id, value in progresses.items()
         ]
-
-        # 파이는 '가장 덜 건넌 사람'만 알려준다. 얼마나 연장할지는 아두이노가 정한다.
         progress_zone = minimum_progress(occupants)
-        eta_sec = maximum_eta_sec(occupants)     # 표시·진단용, 전송하지 않는다
+        eta_sec = maximum_eta_sec(occupants)    
 
         return FrameResult(
             progress=progress_zone,
@@ -143,7 +107,6 @@ class SignalExtensionPipeline:
         )
 
     def run(self, on_result=None):
-        """실시간 루프 (신호 연장만). 쓰러짐까지 함께 돌리려면 CombinedPipeline을 쓸 것."""
         with self.camera, self.serial_comm:
             for frame in self.camera.frames():
                 result = self.process_frame(frame)
@@ -156,18 +119,13 @@ class SignalExtensionPipeline:
 
 @dataclass
 class FallAlarmResult:
-    """FallAlarmPipeline.process_frame 한 번의 결과."""
-
     fall_confirmed: bool = False
     confirmed_ids: set = field(default_factory=set)
     people_count: int = 0
-    # 이번 프레임에 실제로 아두이노로 보낸 줄("fall"/"normal") 또는 None.
-    # 변화 시와 하트비트에만 보내므로 대부분의 프레임에서 None이다(SerialComm.update_state 참고).
     command_sent: object = None
 
 
 class FallAlarmPipeline:
-    
     def __init__(self, camera=None, detector=None, serial_comm=None,
                  zones=None, roi_px=None, fall_detector=None):
         self.camera = camera or CameraCapture()
@@ -175,7 +133,6 @@ class FallAlarmPipeline:
         self.serial_comm = serial_comm or SerialComm()
         self.zones = zones
         self.roi_px = roi_px
-        # ROI를 화면 비율로 잡는 경로는 프레임 크기를 알아야 하므로 첫 프레임까지 미룬다.
         self._fall = fall_detector
 
     def _fall_pipeline(self, frame):
@@ -191,22 +148,11 @@ class FallAlarmPipeline:
         return self._fall
 
     def process_frame(self, frame, now=None) -> FallAlarmResult:
-        """한 프레임을 처리하고, 필요하면 부저 명령을 보낸다.
-
-        now: 판단 기준 시각(초). 생략하면 time.monotonic().
-             쓰러짐 판정과 알람 하트비트가 **같은 시계**를 쓰도록 한 값을 둘 다에 넘긴다.
-             원문 PoC는 time.time()을 썼지만 둘 다 '차이'만 쓰므로 동작은 같고,
-             monotonic은 시스템 시각이 조정돼도 뒤로 가지 않는다는 장점이 있다.
-        """
         now = time.monotonic() if now is None else now
         boxes = self.detector.detect(frame)
         return self.process_boxes(boxes, frame, now)
 
     def process_boxes(self, boxes, frame, now=None) -> FallAlarmResult:
-        """이미 검출된 박스로 처리한다 (추론 1회 공유 — SignalExtensionPipeline과 같은 이유).
-
-        frame은 ROI를 화면 비율로 잡을 때 크기를 알아야 해서 받는다(첫 프레임에만 쓰인다).
-        """
         now = time.monotonic() if now is None else now
 
         fall = self._fall_pipeline(frame).update(boxes, now)
@@ -221,21 +167,11 @@ class FallAlarmPipeline:
         )
 
     def reset_alarm(self):
-        """오탐으로 부저가 계속 울릴 때의 탈출구 (원문 PoC의 'r' 키와 같다).
-
-        쓰러짐 누적을 지우고 부저도 즉시 끈다. 누적만 지우면 다음 프레임에 다시
-        확정될 수 있고, 부저만 끄면 파이 쪽 상태와 어긋난다 — 둘 다 해야 한다.
-        """
         if self._fall is not None:
             self._fall.reset()
         self.serial_comm.send_state(STATE_NORMAL)
 
     def run(self, on_result=None):
-        """실시간 루프. on_result(result, frame)이 주어지면 프레임마다 호출한다.
-
-        표시·로깅을 콜백으로 뺀 이유: 헤드리스(파이 SSH)와 창 모드가 필요한데,
-        그 차이를 파이프라인이 알 필요가 없다. main.py가 콜백으로 결정한다.
-        """
         with self.camera, self.serial_comm:
             for frame in self.camera.frames():
                 result = self.process_frame(frame)
@@ -245,19 +181,14 @@ class FallAlarmPipeline:
 
 @dataclass
 class CombinedResult:
-    """CombinedPipeline.process_frame 한 번의 결과."""
-
     fall: FallAlarmResult = field(default_factory=FallAlarmResult)
     extension: FrameResult = field(default_factory=FrameResult)
-    state: str = STATE_NORMAL          # 실제로 아두이노에 반영된 상태
-    zone: object = None                # ZONE 상태일 때의 진척도
-    line_sent: object = None           # 이번 프레임에 보낸 줄, 안 보냈으면 None
+    state: str = STATE_NORMAL         
+    zone: object = None                
+    line_sent: object = None          
 
 
 class CombinedPipeline:
-  
-    ## 상태 우선순위: fall > zone > normal
-
     def __init__(self, camera=None, detector=None, serial_comm=None,
                  extension=None, fall=None, zones=None):
         self.camera = camera or CameraCapture()
@@ -275,11 +206,9 @@ class CombinedPipeline:
         )
 
     def process_frame(self, frame, timestamp=None) -> CombinedResult:
+
         now = time.monotonic() if timestamp is None else timestamp
-
-        # ---- 추론 1회 ----
         boxes = self.detector.detect(frame)
-
         fall_result = self.fall.process_boxes(boxes, frame, now)
         ext_result = self.extension.process_boxes(boxes, now)
 
@@ -295,7 +224,6 @@ class CombinedPipeline:
         )
 
     def reset_alarm(self):
-        """오탐으로 사이렌에 갇혔을 때의 탈출구."""
         self.fall.reset_alarm()
 
     def run(self, on_result=None):

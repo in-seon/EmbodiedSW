@@ -32,16 +32,11 @@ class SerialComm:
 
         self._injected = connection
         self._conn = None
-        self._rx = b""                    # 아직 개행을 못 만난 수신 바이트
-        # 마지막으로 보낸 (상태, 연장초). 변화 감지에 쓴다 — ETA는 일부러 넣지 않는다.
+        self._rx = b""                  
         self._last_state_key = (None, None)
         self._last_state_sent = 0.0
-        self.ready = False          # READY 또는 PONG을 받아 연결이 확인됐는지
-        self.recent_lines = []      # 최근 수신 줄 (진단·도구 표시용, 최대 50줄)
-
-    # ------------------------------------------------------------------
-    # 연결
-    # ------------------------------------------------------------------
+        self.ready = False         
+        self.recent_lines = []    
 
     @staticmethod
     def available_ports():
@@ -60,12 +55,11 @@ class SerialComm:
             )
         candidates = [p for p in ports if p.vid in _ARDUINO_VIDS]
         if len(candidates) != 1:
-            # VID로 못 좁혔으면 포트가 딱 하나일 때만 그것을 쓴다.
             candidates = ports if len(ports) == 1 else candidates
         if len(candidates) != 1:
             listing = "\n".join(f"  - {p.device}  {p.description}" for p in ports)
             raise RuntimeError(
-                "아두이노 포트를 자동으로 특정할 수 없습니다. config.SERIAL_PORT에 직접 지정하세요.\n"
+                "아두이노 포트를 자동으로 특정할 수 없습니다.\n"
                 f"연결된 포트:\n{listing}"
             )
         return candidates[0].device
@@ -76,20 +70,9 @@ class SerialComm:
         else:
             port = self.port or self._autodetect_port()
             try:
-                # timeout=0 -> 논블로킹 읽기 (모듈 docstring "왜 논블로킹인가" 참고)
                 self._conn = serial.Serial(port, self.baudrate, timeout=0)
             except serial.SerialException as exc:
-                # pyserial의 원래 메시지는 원인을 거의 알려주지 않는다("could not open port").
-                # 실제로 겪는 원인은 대부분 아래 셋 중 하나다.
-                raise RuntimeError(
-                    f"시리얼 포트를 열 수 없습니다: {port}\n"
-                    f"  ({exc})\n"
-                    "  - 권한: 라즈베리파이에서는 사용자가 dialout 그룹에 있어야 합니다.\n"
-                    "      sudo usermod -aG dialout $USER   (실행 후 재로그인)\n"
-                    "  - 점유: 아두이노 IDE의 시리얼 모니터가 켜져 있으면 포트를 잡고 있습니다. 닫으세요.\n"
-                    "  - 포트: 케이블이 빠졌거나 이름이 바뀌었을 수 있습니다.\n"
-                    "      python tools/manual_buzzer_check.py --list 로 목록을 확인하세요."
-                ) from exc
+                raise RuntimeError(f"시리얼 포트를 열 수 없습니다: {port}") from exc
             self.port = port
 
         self._rx = b""
@@ -114,13 +97,7 @@ class SerialComm:
                 return
             time.sleep(0.05)
 
-        raise RuntimeError(
-            f"아두이노가 응답하지 않습니다 (포트 {self.port}, {self.baudrate}bps).\n"
-            "  - 보드레이트가 스케치의 Serial.begin() 값과 같은지\n"
-            "  - 시리얼 모니터 등 다른 프로그램이 포트를 잡고 있지 않은지\n"
-            "  - 포트가 맞는지 (SerialComm.available_ports()로 목록 확인)\n"
-            "확인하세요."
-        )
+        raise RuntimeError(f"아두이노가 응답하지 않습니다 (포트 {self.port}, {self.baudrate}bps).")
 
     def close(self):
     
@@ -132,7 +109,7 @@ class SerialComm:
                 if hasattr(self._conn, "flush"):
                     self._conn.flush()
         except Exception:
-            pass  # 이미 케이블이 빠진 경우 등 — 닫는 것이 우선이다.
+            pass  
         finally:
             self._conn.close()
             self._conn = None
@@ -145,9 +122,6 @@ class SerialComm:
     def __exit__(self, *exc):
         self.close()
 
-    # ------------------------------------------------------------------
-    # 전송 계층
-    # ------------------------------------------------------------------
 
     def _send(self, line: str):
         if self._conn is None:
@@ -165,7 +139,6 @@ class SerialComm:
         lines = []
         while b"\n" in self._rx:
             raw, self._rx = self._rx.split(b"\n", 1)
-            # 아두이노 println은 "\r\n"으로 끝나므로 \r도 함께 털어낸다.
             text = raw.decode("ascii", errors="replace").strip()
             if text:
                 lines.append(text)
@@ -177,23 +150,12 @@ class SerialComm:
         return lines
 
     def _handle_line(self, line: str):
-        """아두이노가 보낸 줄 하나를 해석한다. **명령을 추가할 때 여기에 분기를 넣는다.**"""
         if line == "READY" or line == "PONG":
             self.ready = True
             if line == "READY":
-                # 아두이노가 방금 재부팅했다 -> 저쪽 상태가 초기화됐으므로 우리가 아는
-                # '마지막으로 보낸 상태'도 무효다. 비워 두면 다음 update_state()가
-                # 하트비트를 기다리지 않고 곧바로 현재 상태를 다시 보낸다.
                 self._last_state_key = (None, None)
-        # 아두이노 -> 파이 방향으로 메시지가 늘어나면 여기에 분기를 추가한다.
-        # (잔여 시간·사이클은 제어부가 소유하므로 파이로 올려보낼 필요가 없다.)
-
-    # ------------------------------------------------------------------
-    # 상태 전송 — 이 채널의 본체
-    # ------------------------------------------------------------------
 
     def ping(self) -> bool:
-        """PING을 보내고 이미 받아 둔 응답 기준으로 연결 상태를 돌려준다(논블로킹)."""
         self._send("PING")
         self.poll()
         return self.ready
@@ -226,5 +188,4 @@ class SerialComm:
 
     @property
     def last_state(self):
-        """파이가 마지막으로 보낸 (상태, 연장초). 아직 아무것도 안 보냈으면 (None, None)."""
         return self._last_state_key
