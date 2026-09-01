@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 대용량 테스트 영상/캘리브레이션 데이터 (필요 시 개별적으로 git add)
+data/*
+!data/.gitkeep
+
+# YOLO 가중치. ultralytics가 최초 실행 시 자동으로 내려받는 공개 가중치라 버전 관리하지 않는다.
+# (config.DETECTION_MODEL_PATH = "yolov8n.pt")
+*.pt
+
+.vscode/
+.idea/
+CLAUDE.md
+AGENTS.md
