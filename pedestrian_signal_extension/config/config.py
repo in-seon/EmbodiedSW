@@ -22,8 +22,8 @@ TRACK_GRACE_FRAMES = 2
 TRACK_INHERIT_DISTANCE_CM = 5.0
 TRACK_INHERIT_DISTANCE_PX = 50.0
 
-CROSSWALK_REAL_WIDTH_CM = 30.0   
-CROSSWALK_REAL_LENGTH_CM = 36.0  
+CROSSWALK_REAL_WIDTH_CM = 19 
+CROSSWALK_REAL_LENGTH_CM = 29.2
 
 SPEED_WINDOW_SEC = 0.5
 SPEED_MIN_SAMPLES = 2
@@ -53,7 +53,7 @@ FALL_CONFIG = {
     "crosswalk_roi": (0.15, 0.30, 0.85, 0.95),
 
     # --- 쓰러짐 판정 ---
-    "fall_angle_deg": 30.0,       # 몸통 축이 수직에서 이만큼 기울면 후보
+    "fall_angle_deg": 10.0,       # 몸통 축이 수직에서 이만큼 기울면 후보
     "fall_confirm_sec": 0.0,      # 이 시간 유지돼야 사이렌 확정 (3초 안에 일어나면 오탐으로 무시)
     "fall_gap_sec": 1.0,          # 확정 전, 이 시간 이내의 짧은 미검출은 무시하고 카운트 이어감 (저 fps 깜빡임 대응)
     "fall_gap_frames": 2,         # 위 갭의 하한을 '실측 프레임 간격 x N'으로도 잡는다.
