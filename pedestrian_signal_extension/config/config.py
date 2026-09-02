@@ -13,13 +13,13 @@ def _weight_path(name: str) -> str:
 
 
 CROSSWALK_ZONE_COUNT = 5
-ZONE_RESIDENCY_FRAMES = 1
+ZONE_RESIDENCY_FRAMES = 2
 ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "data" / "zone_config.json")
-TRACK_GRACE_FRAMES = 2
+TRACK_GRACE_FRAMES = 3
 
 #   하한 — **공백 동안 사람이 움직인 거리보다 커야 한다.** 
 #   상한 — **구역 크기(40cm/5 = 8cm)를 넘으면 안 된다.** 넘으면 옆 구역의 남남을 잇는다.
-TRACK_INHERIT_DISTANCE_CM = 5.0
+TRACK_INHERIT_DISTANCE_CM = 8.0
 TRACK_INHERIT_DISTANCE_PX = 50.0
 
 CROSSWALK_REAL_WIDTH_CM = 19 
@@ -35,7 +35,7 @@ FOOT_POINT_OFFSET_RATIO = 0.1
 DETECTION_MODEL_PATH = _weight_path("yolov8n-pose.pt")  
 DETECTION_CONFIDENCE_THRESHOLD = 0.1
 DETECTION_TRACKER = "bytetrack.yaml"
-DETECTION_IMGSZ = 480
+DETECTION_IMGSZ = 320
 
 CAMERA_SOURCE = "picamera2"
 CAMERA_RESOLUTION = (640, 480)
