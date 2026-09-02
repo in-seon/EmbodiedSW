@@ -1,30 +1,11 @@
-"""Zone(횡단보도 5구역) 캘리브레이션 도구.
-
+"""
+Zone(횡단보도 5구역) 캘리브레이션 도구.
 카메라 프레임 한 장을 띄우고, 횡단보도 사각형의 네 꼭짓점을 아래 순서로 클릭한다.
-
-    1) 시작 변 왼쪽   2) 시작 변 오른쪽   3) 끝 변 오른쪽   4) 끝 변 왼쪽
-
+1) 시작 변 왼쪽   2) 시작 변 오른쪽   3) 끝 변 오른쪽   4) 끝 변 왼쪽
 '시작 변 -> 끝 변' 방향이 보행자가 걷는 방향이며, 이 방향을 따라 자동으로 N등분(기본 5구역)한다.
 저장된 JSON은 CrosswalkZones.load()가 그대로 읽는다.
-
 --width-cm / --length-cm 로 횡단보도(모형)의 실제 치수를 함께 주면 호모그래피까지 만들어져
-속도를 cm/s로 낼 수 있다(CLAUDE.md 2.2, 2.3). 생략하면 구역 판정만 되고 속도는 px/s로 나온다.
-
-    - width  = 걷는 방향과 '수직'인 변의 길이 (시작-왼쪽 <-> 시작-오른쪽 사이)
-    - length = 걷는 방향 변의 길이 (시작 변 <-> 끝 변 사이)
-
-    's' : config.ZONE_CONFIG_PATH(또는 --out)에 저장
-    'r' : 점 초기화
-    'q' : 종료
-
-중요: 카메라를 최종 설치 위치에 '고정한 뒤' 캘리브레이션할 것. 카메라를 움직이거나 프레임
-해상도를 바꾸면 zone 좌표와 호모그래피가 모두 무효가 되어 다시 찍어야 한다.
-
-사용법:
-    python tools/zone_calibrator.py --source 0                     # PC USB 웹캠
-    python tools/zone_calibrator.py --source picamera2             # 파이 CSI 카메라
-    python tools/zone_calibrator.py --source path/to/sample.jpg --n 5
-    python tools/zone_calibrator.py --source picamera2 --width-cm 90 --length-cm 300
+속도를 cm/s로 낼 수 있다.
 """
 
 import argparse
@@ -41,8 +22,6 @@ from src.capture import grab_one_frame
 from src.zone import CrosswalkZones
 
 _points = []
-# OpenCV의 putText는 한글을 그리지 못하고 '???'로 표시하므로 화면 라벨은 영문으로 둔다.
-# (1) 시작-왼쪽 (2) 시작-오른쪽 (3) 끝-오른쪽 (4) 끝-왼쪽
 _LABELS = ["1) START-LEFT", "2) START-RIGHT", "3) END-RIGHT", "4) END-LEFT"]
 
 
@@ -52,25 +31,14 @@ def _on_mouse(event, x, y, flags, param):
 
 
 def _grab_reference_frame(source):
-    """캘리브레이션할 정지 화면 한 장을 얻는다.
-
-    카메라 여는 로직은 src/capture.py 한 곳에 있다(파이 CSI = Picamera2, 그 외 = cv2).
-    덕분에 파이에서 `--source picamera2` 로 그대로 캘리브레이션할 수 있다.
-    """
     try:
         source = int(source)
     except (ValueError, TypeError):
-        pass  # "picamera2" / 파일 경로 / URL 인 경우
+        pass  
     return grab_one_frame(source)
 
 
 def _draw_preview(frame, n_zones, width_cm=None, length_cm=None):
-    """현재 클릭된 점과, 4점이 다 찍혔으면 N등분 미리보기를 그린다.
-
-    치수를 함께 넘기는 것이 중요하다. 치수가 있으면 구역이 '실제 거리' 기준으로 나뉘므로
-    (CrosswalkZones.from_quad 참고) 미리보기가 저장될 결과와 같아진다. 치수 없이 그리면
-    화면상 균등 분할이 보이는데, 그건 실제로는 균등하지 않은 대체 경로다.
-    """
     display = frame.copy()
     for i, p in enumerate(_points):
         cv2.circle(display, p, 5, (0, 0, 255), -1)
@@ -109,10 +77,7 @@ def main():
 
     if args.width_cm is None or args.length_cm is None:
         print(
-            "[안내] --width-cm / --length-cm 가 없어 호모그래피는 저장되지 않습니다.\n"
-            "       구역 판정은 정상 동작하지만 속도는 px/s로만 나옵니다(원근 보정 없음).\n"
-            "       횡단보도 모형을 실측한 뒤 다시 실행하면 cm/s로 낼 수 있습니다."
-        )
+            "--width-cm / --length-cm 가 없어 호모그래피는 저장되지 않습니다.\n" )
 
     frame = _grab_reference_frame(args.source)
 
@@ -138,8 +103,6 @@ def main():
             if args.width_cm is not None and args.length_cm is not None:
                 payload["real_width_cm"] = args.width_cm
                 payload["real_length_cm"] = args.length_cm
-            # 캘리브레이션 당시 해상도를 남긴다 — 운영 해상도가 다르면 좌표가 어긋나므로,
-            # 나중에 "왜 안 맞지?" 를 추적할 수 있어야 한다.
             payload["frame_size"] = [int(frame.shape[1]), int(frame.shape[0])]
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)

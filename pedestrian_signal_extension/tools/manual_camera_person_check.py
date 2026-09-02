@@ -109,9 +109,9 @@ def main():
 
     show = not args.no_display
     if show:
-        print("카메라 창에서 'q'를 누르면 종료합니다.")
+        print("'q'를 누르면 종료")
     else:
-        print("--no-display: 창 없이 1초마다 측정값을 출력합니다. 종료는 Ctrl+C.")
+        print("--no-display: 창 없이 1초마다 측정값을 출력 종료는 Ctrl+C.")
 
     fps_t0, fps_frames, fps = time.monotonic(), 0, 0.0
 

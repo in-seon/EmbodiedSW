@@ -1,36 +1,3 @@
-"""쓰러짐 감지가 왜 안 울리는지 **어디서 끊기는지** 보는 진단 도구.
-
-`main.py --mode fall`은 결론("정상" / "!! FALL !!")만 찍는다. 그래서 안 울릴 때
-원인이 검출인지, ROI인지, 각도 임계값인지 구분할 수가 없다 — 세 곳 중 어디가
-끊겨도 화면에는 똑같이 "정상"으로만 보인다.
-
-이 도구는 판정 체인을 그대로 다시 밟으면서 **각 단계의 중간값**을 사람별로 찍는다:
-
-    검출  ->  ROI 겹침  ->  쓰러짐 후보(각도 or 종횡비)  ->  시간 누적 확정
-     ①          ②                  ③                          ④
-
-읽는 법 (한 줄이 사람 한 명):
-
-    #0 id=1 conf=0.71 box=(210,300)-(402,378) w/h=2.54
-       각도=87.3° (어깨conf=0.62 엉덩이conf=0.55)   <- ③의 근거. None이면 종횡비 폴백
-       ROI겹침=0.94 >= 0.30 OK                      <- ②
-       => 후보=True  ROI안=True  ==> 이 사람은 확정 대상
-
-  - 사람 줄이 **아예 안 나온다** -> ① 검출 실패. DETECTION_CONFIDENCE_THRESHOLD /
-    DETECTION_IMGSZ / 조명·거리 문제지 쓰러짐 로직 문제가 아니다.
-  - ROI겹침이 임계값 미만 -> ② 카메라 화각 대비 crosswalk_roi가 안 맞는다.
-    화면에 표시되는 회색 사각형(--display)이 실제 횡단보도를 덮는지 볼 것.
-  - 각도가 None -> 키포인트 신뢰도가 낮아 torso_angle_deg가 포기한 상태.
-    이때는 종횡비(w/h > fall_aspect_ratio)로만 판정한다. 모형이 작으면 흔하다.
-  - 각도가 나오는데 임계값 미만 -> ③ fall_angle_deg를 낮출 것.
-
-사용:
-
-    python tools/manual_fall_debug.py                      # config 기본 카메라
-    python tools/manual_fall_debug.py --source test.mp4 --display
-
-"""
-
 import argparse
 import sys
 import time
@@ -68,7 +35,7 @@ def _describe(person, cfg, roi_px):
 
     if ang is not None:
         ok = ang > cfg["fall_angle_deg"]
-        lines.append(f"     ③ 각도={ang:5.1f}° {'>' if ok else '<='} "
+        lines.append(f"     각도={ang:5.1f}° {'>' if ok else '<='} "
                      f"임계 {cfg['fall_angle_deg']}° -> 후보={ok}"
                      f"   (어깨conf={_kp_conf(person.keypoints, (5, 6)):.2f} "
                      f"엉덩이conf={_kp_conf(person.keypoints, (11, 12)):.2f})")
@@ -77,10 +44,10 @@ def _describe(person, cfg, roi_px):
         why = "키포인트 없음" if person.keypoints is None else (
             f"관절 신뢰도 낮음 (어깨={_kp_conf(person.keypoints, (5, 6)):.2f} "
             f"엉덩이={_kp_conf(person.keypoints, (11, 12)):.2f} < 0.3)")
-        lines.append(f"     ③ 각도=None ({why}) -> 종횡비 폴백: "
+        lines.append(f"     각도=None ({why}) -> 종횡비 폴백: "
                      f"{ratio:.2f} {'>' if ok else '<='} {cfg['fall_aspect_ratio']} -> 후보={ok}")
 
-    lines.append(f"     ② ROI겹침={overlap:.2f} {'>=' if on_cw else '<'} "
+    lines.append(f"     ROI겹침={overlap:.2f} {'>=' if on_cw else '<'} "
                  f"{cfg['fall_roi_overlap']} -> ROI안={on_cw}   (발위치 ROI안={foot_in_roi(person, roi_px)})")
     lines.append(f"     => 확정 대상={'예' if (ok and on_cw) else '아니오'}")
     return lines
@@ -118,7 +85,7 @@ def _report(result, roi_px, cfg, frame_no, now):
     print(f"\n[frame {frame_no}] t={now:.2f}s  검출 {len(result['people'])}명  "
           f"확정={result['confirmed_ids'] or '없음'}")
     if not result["people"]:
-        print("  ① 사람 검출 0 — 쓰러짐 로직까지 가지도 못한다. "
+        print(" 사람 검출 0 "
               f"(conf 임계={config.DETECTION_CONFIDENCE_THRESHOLD}, imgsz={config.DETECTION_IMGSZ})")
         return
     for person in result["people"]:
@@ -135,7 +102,7 @@ def main():
     parser.add_argument("--every", type=float, default=1.0,
                         help="콘솔 출력 최소 간격(초). 0이면 매 프레임 (기본 1.0)")
     parser.add_argument("--zones", action="store_true",
-                        help="zone 설정이 있으면 그 꼭짓점으로 ROI를 잡는다 (main과 동일)")
+                        help="zone 설정이 있으면 그 꼭짓점을 ROI로")
     args = parser.parse_args()
 
     source = args.source if args.source is not None else config.CAMERA_SOURCE
@@ -149,7 +116,7 @@ def main():
             zones = CrosswalkZones.load()
             roi_from = "zone 캘리브레이션"
         except Exception as exc:
-            print(f"[경고] zone을 못 읽어 화면 비율로 갑니다: {exc}")
+            print(f"zone을 못 읽어 화면 비율 사용: {exc}")
 
     print(f"[설정] source={source!r}  모델={config.DETECTION_MODEL_PATH}")
     print(f"[설정] conf임계={config.DETECTION_CONFIDENCE_THRESHOLD} imgsz={config.DETECTION_IMGSZ}")
