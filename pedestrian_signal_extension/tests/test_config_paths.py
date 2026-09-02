@@ -21,15 +21,8 @@ from config import config
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT.parent
 
-# 프로젝트 안에 있어야 하는 경로 설정들
 PATH_SETTINGS = ["ZONE_CONFIG_PATH", "DETECTION_MODEL_PATH"]
 
-# 설정별로 허용되는 뿌리.
-#
-# 가중치(*.pt)만 리포 루트까지 허용한다. 팀원 PoC(crosswalk_poc.py)가 리포 루트에서
-# 같은 가중치를 쓰고 있어서 파일이 실제로 거기 있고, 그걸 못 찾으면 ultralytics가
-# 같은 6.5MB를 실행 위치마다 다시 내려받는다(config._WEIGHT_DIRS 참고).
-# 그 외 데이터 경로는 여전히 프로젝트 안이어야 한다.
 ALLOWED_ROOTS = {
     "ZONE_CONFIG_PATH": (PROJECT_ROOT,),
     "DETECTION_MODEL_PATH": (PROJECT_ROOT, REPO_ROOT),
@@ -60,7 +53,7 @@ def test_absolute_path_stays_inside_project(name):
         pytest.skip(f"{name}이 설정되지 않음")
     path = Path(value)
     if not path.is_absolute():
-        return  # 위 테스트가 다루는 '순수 파일명' 경우
+        return
     roots = ALLOWED_ROOTS[name]
     assert any(path.is_relative_to(root) for root in roots), (
         f"{name}이 허용된 범위 밖을 가리킵니다: {value!r}\n"

@@ -2,28 +2,5 @@ opencv-python
 numpy
 pyserial
 pytest
-
-# 검출 모델. CLAUDE.md 2.6에 따라 COCO 사전학습 yolov8n.pt를 그대로 쓰기로 확정했으므로
-# 이제 도구용이 아니라 핵심 의존성이다 (src/detection.py).
-# 가중치는 최초 실행 시 자동 다운로드된다(약 6MB).
 ultralytics
-
-# YOLO.track()의 프레임 간 매칭(선형 할당)에 필요. 없으면 track_id가 안 붙고
-# ModuleNotFoundError: No module named 'lap' 로 죽는다.
-# track_id는 속도 추정(SpeedEstimator)과 잔류 판정(CrosswalkOccupancy)의 전제다.
 lap
-
-# --- 라즈베리파이에서만 필요 (pip 아님) ---
-# CSI 리본 카메라는 Picamera2(libcamera)로만 열린다. 라즈베리파이 5 + Bookworm에는
-# 레거시 카메라 스택이 없어 cv2.VideoCapture로는 CSI 카메라가 잡히지 않는다.
-# pip이 아니라 apt로 설치해야 한다(시스템 libcamera와 버전이 맞아야 함):
-#
-#     sudo apt install -y python3-picamera2
-#
-# 파이에서 venv를 쓴다면 시스템 패키지가 보이도록 만들어야 한다:
-#     python3 -m venv --system-site-packages .venv
-#
-# PC에는 설치되지 않으며, src/capture.py가 지연 import 하므로 없어도 나머지는 전부 동작한다.
-
-# 라즈베리파이 배포 시 추론이 느리면 ncnn/tflite 변환을 검토한다 (CLAUDE.md 7장).
-# 실측 FPS 벤치마크 전까지 추가 의존성은 넣지 않는다.

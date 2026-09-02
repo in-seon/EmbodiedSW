@@ -30,14 +30,8 @@ from src.fall_detection import (
 )
 from src.zone import CrosswalkZones
 
-ROI = (0, 0, 640, 480)          # 화면 전체를 횡단보도로 보는 단순 ROI
+ROI = (0, 0, 640, 480)
 
-# 이 파일은 **판단 로직**(원문 이식 충실도)을 고정하는 테스트지, 운영 튜닝값을 고정하는
-# 테스트가 아니다. 그래서 아래 시간 파라미터만 명시적으로 못박고 나머지는 config를 따른다.
-#
-# 못박지 않으면 현장에서 config.FALL_CONFIG의 fall_confirm_sec을 조정할 때마다 아래 시나리오
-# ("3초 유지돼야 확정", "3초 안에 일어나면 무시")가 통째로 깨진다. 검증하려는 것은 '3초'라는
-# 값이 아니라 "confirm_sec을 채워야 확정된다"는 동작이므로, 값은 테스트가 소유하는 편이 맞다.
 CFG = dict(config.FALL_CONFIG, fall_confirm_sec=3.0, fall_clear_sec=3.0)
 
 
@@ -50,8 +44,6 @@ def lying(x=100, y=100, w=120, h=40, track_id=1):
     """누운 사람 — 가로로 길다(키포인트 없을 때의 폴백 판정 대상)."""
     return Person(bbox=(x, y, x + w, y + h), conf=0.9, keypoints=None, track_id=track_id)
 
-
-# --- 어댑터 (원문에 없던 배선 코드) ---
 
 def test_person_from_box_maps_fields():
     box = BoundingBox(10.4, 20.6, 50.2, 140.9, 0.87, "person", track_id=3)
@@ -107,8 +99,6 @@ def test_roi_from_zones_covers_calibrated_quad():
     assert (x2, y2) == (560, 460)
 
 
-# --- 이식된 판단 로직 (crosswalk_poc.py 원문) ---
-
 def test_lying_person_is_fall_candidate_by_aspect_ratio():
     """키포인트가 없으면 bbox 가로/세로 비율로 폴백 판정한다."""
     assert looks_fallen(lying(), CFG) is True
@@ -118,11 +108,11 @@ def test_lying_person_is_fall_candidate_by_aspect_ratio():
 def test_torso_angle_needs_confident_keypoints():
     """어깨/엉덩이 신뢰도가 낮으면 각도를 내지 않는다(None -> 비율 폴백)."""
     kp = np.zeros((17, 3))
-    kp[[5, 6, 11, 12], 2] = 0.1          # 신뢰도 낮음
+    kp[[5, 6, 11, 12], 2] = 0.1
     assert torso_angle_deg(kp) is None
 
-    kp[[5, 6], :2] = [100, 100]          # 어깨
-    kp[[11, 12], :2] = [200, 100]        # 엉덩이 — 수평으로 누움
+    kp[[5, 6], :2] = [100, 100]
+    kp[[11, 12], :2] = [200, 100]
     kp[[5, 6, 11, 12], 2] = 0.9
     assert torso_angle_deg(kp) == pytest.approx(90.0)
 
@@ -131,7 +121,6 @@ def test_bbox_overlap_uses_smaller_area_not_iou():
     """넘어질 때 bbox 넓이가 크게 변해도 견디도록 IoU가 아니라 '교집합/작은쪽'을 쓴다."""
     tall = (0, 0, 40, 120)
     wide = (0, 0, 120, 40)
-    # 교집합 40x40=1600, 작은 쪽 넓이 4800 -> 0.333 (IoU라면 1600/6400=0.25로 더 낮다)
     assert bbox_overlap(tall, wide) == pytest.approx(1600 / 4800)
 
 
@@ -150,8 +139,8 @@ def test_getting_up_within_confirm_sec_does_not_trigger():
 
     monitor.update(True, now=0.0, gap_sec=1.0)
     monitor.update(True, now=1.5, gap_sec=1.0)
-    monitor.update(False, now=3.0, gap_sec=1.0)     # 일어남 (갭보다 긴 공백)
-    assert monitor.update(True, now=4.0, gap_sec=1.0) is False   # 후보가 취소돼 처음부터
+    monitor.update(False, now=3.0, gap_sec=1.0)
+    assert monitor.update(True, now=4.0, gap_sec=1.0) is False
 
 
 def test_short_detection_gap_does_not_reset_candidate():
@@ -159,7 +148,7 @@ def test_short_detection_gap_does_not_reset_candidate():
     monitor = FallMonitor(CFG)
 
     monitor.update(True, now=0.0, gap_sec=1.0)
-    monitor.update(False, now=0.5, gap_sec=1.0)     # 갭 이내의 짧은 미검출
+    monitor.update(False, now=0.5, gap_sec=1.0)
     assert monitor.update(True, now=3.0, gap_sec=1.0) is True
 
 
@@ -170,15 +159,14 @@ def test_siren_needs_sustained_clear_to_release():
         monitor.update(True, now=t, gap_sec=1.0)
     assert monitor.confirmed is True
 
-    assert monitor.update(False, now=4.0, gap_sec=1.0) is True   # 아직 유지
-    assert monitor.update(False, now=7.0, gap_sec=1.0) is False  # 3초 연속 -> 해제
+    assert monitor.update(False, now=4.0, gap_sec=1.0) is True
+    assert monitor.update(False, now=7.0, gap_sec=1.0) is False
 
 
 def test_two_people_do_not_accumulate_together():
     """서로 다른 사람의 짧은 이상 자세가 합산돼 사이렌이 울리면 안 된다."""
     tracker = FallTracker(CFG)
 
-    # A가 1.6초, 이어서 B가 1.6초 — 각자는 3초 미만이므로 확정되면 안 된다.
     tracker.update([lying(x=0, track_id=1)], [True], [True], now=0.0)
     tracker.update([lying(x=0, track_id=1)], [True], [True], now=1.6)
     confirmed = tracker.update([lying(x=400, track_id=2)], [True], [True], now=3.2)
@@ -195,18 +183,16 @@ def test_state_is_inherited_when_tracker_drops_id():
     tracker = FallTracker(CFG)
 
     tracker.update([lying(track_id=1)], [True], [True], now=0.0)
-    tracker.update([lying(track_id=None)], [True], [True], now=1.5)   # ID 유실
+    tracker.update([lying(track_id=None)], [True], [True], now=1.5)
     confirmed = tracker.update([lying(track_id=None)], [True], [True], now=3.0)
 
     assert confirmed != set()
 
 
-# --- 파이프라인 배선 ---
-
 def test_pipeline_confirms_fall_from_bounding_boxes():
     """BoundingBox 목록만 넣으면 쓰러짐 확정까지 나온다(원문 main() 루프와 같은 순서)."""
     pipeline = FallDetectionPipeline(roi_px=ROI, cfg=CFG)
-    box = BoundingBox(100, 100, 220, 140, 0.9, "person", track_id=1)   # 가로로 긴 = 누움
+    box = BoundingBox(100, 100, 220, 140, 0.9, "person", track_id=1)
 
     assert pipeline.update([box], now=0.0)["fall_confirmed"] is False
     assert pipeline.update([box], now=1.5)["fall_confirmed"] is False
@@ -219,7 +205,7 @@ def test_pipeline_confirms_fall_from_bounding_boxes():
 
 def test_pipeline_ignores_standing_person():
     pipeline = FallDetectionPipeline(roi_px=ROI, cfg=CFG)
-    box = BoundingBox(100, 100, 140, 220, 0.9, "person", track_id=1)   # 세로로 긴 = 서 있음
+    box = BoundingBox(100, 100, 140, 220, 0.9, "person", track_id=1)
 
     for t in (0.0, 1.5, 3.0, 5.0):
         result = pipeline.update([box], now=t)
@@ -231,8 +217,8 @@ def test_pipeline_ignores_standing_person():
 def test_pipeline_reports_foot_in_roi_separately():
     """신호 연장용 '발 위치' 판정과 쓰러짐용 '몸 전체 겹침'은 별개 기준이다."""
     pipeline = FallDetectionPipeline(roi_px=(0, 0, 200, 200), cfg=CFG)
-    inside = BoundingBox(50, 50, 90, 170, 0.9, "person", track_id=1)     # 발 y=170 -> ROI 안
-    outside = BoundingBox(50, 300, 90, 420, 0.9, "person", track_id=2)   # 발 y=420 -> ROI 밖
+    inside = BoundingBox(50, 50, 90, 170, 0.9, "person", track_id=1)
+    outside = BoundingBox(50, 300, 90, 420, 0.9, "person", track_id=2)
 
     result = pipeline.update([inside, outside], now=0.0)
 
@@ -247,17 +233,16 @@ def test_fallen_person_whose_feet_left_roi_still_triggers_siren():
     ROI 밖으로 빠져 사이렌을 놓친다. 몸 전체 겹침은 자세가 변해도 안 튄다.
     """
     pipeline = FallDetectionPipeline(roi_px=(0, 0, 200, 200), cfg=CFG)
-    # ROI 아래 경계에 걸친 누운 사람: 발(110, 210)은 ROI 밖, 몸은 83% 겹침.
     straddling = BoundingBox(50, 150, 170, 210, 0.9, "person", track_id=1)
 
     first = pipeline.update([straddling], now=0.0)
-    assert first["in_roi_flags"] == [False]      # 신호 연장 기준으로는 '횡단보도 밖'
-    assert first["fallen_flags"] == [True]       # 자세는 쓰러짐 후보
+    assert first["in_roi_flags"] == [False]
+    assert first["fallen_flags"] == [True]
 
     pipeline.update([straddling], now=1.5)
     result = pipeline.update([straddling], now=3.0)
 
-    assert result["fall_confirmed"] is True      # 몸 겹침 기준이라 사이렌은 울린다
+    assert result["fall_confirmed"] is True
 
 
 def test_pipeline_reset_clears_siren():

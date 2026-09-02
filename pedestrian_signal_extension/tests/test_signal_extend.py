@@ -8,8 +8,6 @@
 from src.signal_extend import Occupant, maximum_eta_sec, minimum_progress
 
 
-# --- 최솟값 요약 ---
-
 def test_no_occupants_returns_none():
     assert minimum_progress([]) is None
 
@@ -39,8 +37,6 @@ def test_ignores_none_entries():
 def test_all_none_progress_returns_none():
     assert minimum_progress([Occupant(progress=None)]) is None
 
-
-# --- ETA는 계측용 ---
 
 def test_max_eta_picks_slowest():
     occupants = [Occupant(progress=2, eta_sec=4.0), Occupant(progress=3, eta_sec=9.5)]

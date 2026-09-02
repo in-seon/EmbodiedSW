@@ -57,13 +57,11 @@ def make_comm(*initial_lines, **kwargs):
     return comm, fake
 
 
-# --- 연결 ---
-
 def test_open_waits_for_ready():
     comm, fake = make_comm("READY")
     comm.open()
     assert comm.ready is True
-    assert fake.sent == []          # READY를 받았으므로 PING을 보낼 필요가 없다
+    assert fake.sent == []
 
 
 def test_open_falls_back_to_ping_when_no_ready():
@@ -102,14 +100,12 @@ def test_missing_baudrate_raises(monkeypatch):
         SerialComm(connection=FakeSerial())
 
 
-# --- 상태 전송 규칙 ---
-
 def test_state_sent_on_change_only():
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 
     assert comm.update_state(STATE_NORMAL, now=0.0) == "normal"
-    assert comm.update_state(STATE_NORMAL, now=1.0) is None    # 매 프레임 보내지 않는다
+    assert comm.update_state(STATE_NORMAL, now=1.0) is None
     assert comm.update_state(STATE_NORMAL, now=2.0) is None
     assert fake.sent == ["normal"]
 
@@ -165,12 +161,10 @@ def test_ready_line_forces_resend():
     comm.open()
 
     comm.update_state(STATE_FALL, now=0.0)
-    fake.feed("READY")                                   # 보드 재부팅
+    fake.feed("READY")
     assert comm.update_state(STATE_FALL, now=0.1) == "fall"
     assert fake.sent == ["fall", "fall"]
 
-
-# --- 줄 포맷 ---
 
 @pytest.mark.parametrize("args,expected", [
     ((STATE_NORMAL, None), "normal"),
@@ -187,8 +181,6 @@ def test_zone_without_number_raises():
     with pytest.raises(ValueError):
         SerialComm.format_state(STATE_ZONE)
 
-
-# --- 수신 파싱 ---
 
 def test_poll_splits_lines_and_strips_crlf():
     comm, fake = make_comm("READY")
@@ -221,8 +213,6 @@ def test_recent_lines_are_capped():
     assert comm.recent_lines[-1] == "ERR 79"
 
 
-# --- 종료 ---
-
 def test_close_returns_to_normal():
     """프로그램이 끝났는데 FALL이나 EXTEND로 남아 있으면 부저가 계속 울거나
     다음 사이클에 의도치 않은 연장이 붙는다."""
@@ -241,7 +231,7 @@ def test_close_from_normal_sends_nothing():
 
     comm.update_state(STATE_NORMAL, now=0.0)
     comm.close()
-    assert fake.sent == ["normal"]          # 종료 시 추가 전송 없음
+    assert fake.sent == ["normal"]
     assert fake.closed is True
 
 

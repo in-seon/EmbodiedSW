@@ -26,7 +26,6 @@ def dispatch(monkeypatch):
             main_module, name,
             lambda args, _n=name: calls.append((_n, args)),
         )
-    # 카메라 소스 정규화는 실제 백엔드를 건드리므로 통과시킨다.
     monkeypatch.setattr("src.capture.normalize_source", lambda s: s)
     return calls
 

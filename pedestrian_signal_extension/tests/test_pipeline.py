@@ -20,7 +20,6 @@ from src.serial_comm import STATE_FALL, STATE_NORMAL, STATE_ZONE
 from src.speed import SpeedEstimator
 from src.zone import CrosswalkOccupancy, CrosswalkZones
 
-# 픽셀 100x200 사각형 = 실제 50cm x 100cm. 걷는 방향은 화면 y 증가 방향.
 CORNERS = [(0, 0), (100, 0), (100, 200), (0, 200)]
 WIDTH_CM, LENGTH_CM = 50.0, 100.0
 
@@ -74,13 +73,12 @@ def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH
         camera=object(),
         detector=FakeDetector(frames),
         zones=zones,
-        occupancy=CrosswalkOccupancy(zones, confirm_frames=confirm_frames),
+        occupancy=CrosswalkOccupancy(zones, confirm_frames=confirm_frames,
+                                     grace_frames=2),
         serial_comm=FakeSerial(),
         speed_estimator=SpeedEstimator(ground_plane=plane, window_sec=10.0),
     )
 
-
-# --- 발 위치 기준 구역 판정 ---
 
 def test_uses_foot_point_not_center_for_zone():
     """박스 중심과 발 위치가 서로 다른 구역에 걸치면, 발 위치 쪽이 채택돼야 한다.
@@ -97,8 +95,6 @@ def test_uses_foot_point_not_center_for_zone():
 
     assert result.pedestrians[0].zone == 3
 
-
-# --- 진척도 (진입 방향 보정) ---
 
 @pytest.mark.parametrize("foot_y,zone", [(10, 1), (50, 2), (100, 3), (150, 4), (190, 5)])
 def test_physical_zone_is_reported(foot_y, zone):
@@ -123,8 +119,8 @@ def test_reverse_entry_progress_is_mirrored():
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
     result = pipeline.process_frame(None, timestamp=1.0)
-    assert result.pedestrians[0].zone == 2      # 물리 구역
-    assert result.progress == 4                  # 거의 다 건넜음
+    assert result.pedestrians[0].zone == 2
+    assert result.progress == 4
     assert result.serial_state() == (STATE_ZONE, 4)
 
 
@@ -133,7 +129,7 @@ def test_opposite_directions_send_the_least_advanced():
 
     보정하지 않으면 둘 다 '2번'이라 구분되지 않는다 — 이 파이프라인의 핵심 요구사항.
     """
-    enter = [box_at(50, 10, 1), box_at(60, 190, 2)]      # 1번 진입 / 5번 진입
+    enter = [box_at(50, 10, 1), box_at(60, 190, 2)]
     both_at_zone2 = [box_at(50, 50, 1), box_at(60, 50, 2)]
     pipeline = build_pipeline([enter, both_at_zone2])
 
@@ -142,9 +138,9 @@ def test_opposite_directions_send_the_least_advanced():
 
     zones = {p.track_id: p.zone for p in result.pedestrians}
     progress = {p.track_id: p.progress for p in result.pedestrians}
-    assert zones == {1: 2, 2: 2}                 # 물리적으로 같은 구역
-    assert progress == {1: 2, 2: 4}              # 진척도는 다르다
-    assert result.progress == 2                  # 덜 건넌 1번 기준
+    assert zones == {1: 2, 2: 2}
+    assert progress == {1: 2, 2: 4}
+    assert result.progress == 2
 
 
 def test_middle_start_is_treated_as_middle():
@@ -154,8 +150,6 @@ def test_middle_start_is_treated_as_middle():
     assert result.progress == 3
     assert result.pedestrians[0].direction is None
 
-
-# --- 아무도 없을 때 ---
 
 def test_no_one_means_normal():
     pipeline = build_pipeline([[]])
@@ -184,8 +178,6 @@ def test_residency_gate_blocks_until_confirmed():
     assert pipeline.process_frame(None, timestamp=0.2).progress == 3
 
 
-# --- 속도는 연장 판단에 쓰이지 않는다 ---
-
 def test_eta_is_measured_but_does_not_change_the_sent_value():
     """ETA는 계측용이다. 있든 없든 보내는 진척도는 같아야 한다."""
     frames = [[box_at(50, 10, 1)], [box_at(50, 100, 1)]]
@@ -193,8 +185,8 @@ def test_eta_is_measured_but_does_not_change_the_sent_value():
     pipeline.process_frame(None, timestamp=0.0)
     result = pipeline.process_frame(None, timestamp=1.0)
 
-    assert result.eta_sec is not None          # 계측은 되고 있다
-    assert result.progress == 3                 # 값은 구역만으로 정해진다
+    assert result.eta_sec is not None
+    assert result.progress == 3
 
 
 def test_standing_person_still_reports_progress():
@@ -210,8 +202,6 @@ def test_standing_person_still_reports_progress():
     assert result.progress == 3
 
 
-# --- 추론 1회 공유 ---
-
 def test_process_boxes_does_not_call_detector():
     """CombinedPipeline이 쓰는 진입점 — 여기서 다시 검출하면 추론이 2배가 된다."""
     pipeline = build_pipeline([[box_at(50, 100, 1)]])
@@ -226,8 +216,6 @@ def test_untracked_detection_is_reported():
     assert result.untracked_count == 1
     assert result.progress is None
 
-
-# --- CombinedPipeline: 상태 우선순위 ---
 
 class StubFall:
     def __init__(self, confirmed):
@@ -266,7 +254,6 @@ def test_fall_wins_over_zone():
     assert result.state == STATE_FALL
     assert result.zone is None
     assert serial.states[-1][0] == STATE_FALL
-    # 구역 판정 자체는 그대로 돌아가고 있다(쓰러짐이 풀리면 곧바로 이어진다).
     assert result.extension.progress == 3
 
 
@@ -302,7 +289,7 @@ def test_zone_resumes_immediately_after_fall_without_normal():
     )
 
     assert combined.process_frame(None, timestamp=0.0).state == STATE_FALL
-    fall.confirmed = False                       # 일어났다 (횡단보도에는 그대로 있다)
+    fall.confirmed = False
     resumed = combined.process_frame(None, timestamp=1.0)
 
     assert resumed.state == STATE_ZONE
@@ -321,24 +308,17 @@ def test_normal_means_nobody_not_fall_cleared():
     assert combined.process_frame(None, timestamp=0.0).state == STATE_NORMAL
 
 
-
-# --- track_id 재발급: 카운트와 방향이 함께 이어져야 한다 ---
-#
-# occupancy가 이름을 바꿔도 CrossingProgress가 모르면 방향이 날아간다. 그러면 거의 다
-# 건넌 사람이 "방금 진입"으로 보고돼 아두이노가 연장을 다시 시작한다.
-
 def test_progress_survives_track_id_reissue():
     """★ 이 기능의 본체. 상속이 없으면 진척도가 4,5 대신 2,1로 뒤집힌다."""
-    # 구역은 y 방향 5등분(0..200) -> 구역 k는 y in [40*(k-1), 40*k].
     frames = [
-        [box_at(50, 20, 1)],    # 구역 1
-        [box_at(50, 60, 1)],    # 구역 2
-        [box_at(50, 100, 1)],   # 구역 3
-        [box_at(50, 140, 7)],   # 구역 4 — 여기서 ID 재발급
-        [box_at(50, 180, 7)],   # 구역 5
+        [box_at(50, 20, 1)],
+        [box_at(50, 60, 1)],
+        [box_at(50, 100, 1)],
+        [box_at(50, 140, 7)],
+        [box_at(50, 180, 7)],
     ]
     pipeline = build_pipeline(frames)
-    pipeline.occupancy.inherit_distance = 60     # 픽셀 (구역 하나가 40px)
+    pipeline.occupancy.inherit_distance = 60
 
     seen = [pipeline.process_frame(None, timestamp=i * 0.1).progress
             for i in range(len(frames))]
@@ -355,7 +335,7 @@ def test_progress_is_reversed_without_inheritance():
         [box_at(50, 180, 7)],
     ]
     pipeline = build_pipeline(frames)
-    pipeline.occupancy.inherit_distance = 0      # 상속 끔
+    pipeline.occupancy.inherit_distance = 0
 
     seen = [pipeline.process_frame(None, timestamp=i * 0.1).progress
             for i in range(len(frames))]

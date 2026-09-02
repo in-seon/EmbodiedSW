@@ -7,14 +7,10 @@ import pytest
 
 from src.ground_plane import GroundPlane
 
-# corners 순서: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽]
 
-# (A) 정면에서 본 직사각형 — 픽셀 100x200 이 실제 50cm x 100cm.
 RECT_PX = [(0, 0), (100, 0), (100, 200), (0, 200)]
 RECT_W_CM, RECT_L_CM = 50.0, 100.0
 
-# (B) 사선 카메라로 본 사다리꼴 — 먼 쪽(끝 변)이 화면에서 좁게 보인다.
-#     실제로는 같은 폭인데 픽셀 폭이 다르다는 점이 원근 보정의 핵심.
 TRAPEZOID_PX = [(0, 200), (100, 200), (70, 50), (30, 50)]
 TRAP_W_CM, TRAP_L_CM = 40.0, 300.0
 
@@ -23,8 +19,6 @@ def approx(point, expected, tol=1e-6):
     assert point[0] == pytest.approx(expected[0], abs=tol)
     assert point[1] == pytest.approx(expected[1], abs=tol)
 
-
-# --- 생성 ---
 
 def test_from_quad_returns_none_when_dimensions_missing():
     """실측 치수가 없으면 호모그래피를 만들지 않는다(속도가 px/s로 떨어지는 경로)."""
@@ -44,8 +38,6 @@ def test_from_quad_rejects_non_positive_dimensions():
     with pytest.raises(ValueError):
         GroundPlane.from_quad(RECT_PX, RECT_W_CM, -10)
 
-
-# --- 좌표 변환 ---
 
 def test_corners_map_to_rectangle_corners():
     """네 꼭짓점은 정확히 (0,0) (w,0) (w,L) (0,L) 로 간다."""
@@ -79,7 +71,6 @@ def test_perspective_correction_beats_raw_pixels():
     """
     plane = GroundPlane.from_quad(TRAPEZOID_PX, TRAP_W_CM, TRAP_L_CM)
 
-    # 화면 중앙선을 따라 픽셀 y를 200(시작) -> 125(중간) -> 50(끝) 으로 3등분.
     near = plane.to_ground((50, 200))
     mid = plane.to_ground((50, 125))
     far = plane.to_ground((50, 50))
@@ -87,10 +78,7 @@ def test_perspective_correction_beats_raw_pixels():
     near_half_cm = mid[1] - near[1]
     far_half_cm = far[1] - mid[1]
 
-    # 픽셀상으로는 두 구간이 똑같이 75px이지만, 실거리는 먼 쪽이 훨씬 길다.
-    # (= 픽셀 속도를 그대로 쓰면 먼 쪽에서 걷는 사람이 느리게 측정된다.)
     assert far_half_cm > near_half_cm * 1.5
-    # 그리고 둘의 합은 전체 길이가 되어야 한다.
     assert near_half_cm + far_half_cm == pytest.approx(TRAP_L_CM, abs=1e-4)
 
 
@@ -123,8 +111,6 @@ def test_point_outside_crosswalk_extrapolates():
     x_cm, y_cm = plane.to_ground((-20, 100))
     assert x_cm < 0
 
-
-# --- 남은 거리 ---
 
 def test_remaining_distance_forward():
     plane = GroundPlane.from_quad(RECT_PX, RECT_W_CM, RECT_L_CM)

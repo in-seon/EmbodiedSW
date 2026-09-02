@@ -8,13 +8,8 @@ from src.zone import CrossingProgress, CrosswalkOccupancy, CrosswalkZones, Zone
 
 SQUARE = [(0, 0), (10, 0), (10, 10), (0, 10)]
 
-# 시작 변 = 왼쪽(x=0), 끝 변 = 오른쪽(x=50). 걷는 방향은 x 증가 방향.
-# corners: [시작-왼쪽, 시작-오른쪽, 끝-오른쪽, 끝-왼쪽]
-# -> 5등분하면 구역 k는 x in [10*(k-1), 10*k], y in [0,10].
 QUAD = [(0, 0), (0, 10), (50, 10), (50, 0)]
 
-# 사선 카메라로 본 횡단보도(사다리꼴) — 먼 쪽(끝 변)이 화면에서 좁고 위에 보인다.
-# 실제 치수는 폭 400cm x 길이 1000cm 인 직사각형.
 OBLIQUE_QUAD = [(80, 460), (560, 460), (400, 150), (240, 150)]
 OBLIQUE_W_CM, OBLIQUE_L_CM = 400.0, 1000.0
 
@@ -29,8 +24,6 @@ def _zone_boundaries_cm(zones, ground_plane):
     return out
 
 
-# --- Zone (단일 폴리곤) ---
-
 def test_zone_contains_point_inside():
     assert Zone(SQUARE).contains((5, 5)) is True
 
@@ -39,8 +32,6 @@ def test_zone_does_not_contain_point_outside():
     assert Zone(SQUARE).contains((20, 20)) is False
 
 
-# --- CrosswalkZones (5구역 위치 판정) ---
-
 def test_from_quad_makes_n_zones():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     assert len(zones) == 5
@@ -48,11 +39,11 @@ def test_from_quad_makes_n_zones():
 
 def test_locate_returns_zone_index_by_position():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
-    assert zones.locate((5, 5)) == 1    # 시작 끝 구역
+    assert zones.locate((5, 5)) == 1
     assert zones.locate((15, 5)) == 2
-    assert zones.locate((25, 5)) == 3   # 정중앙
+    assert zones.locate((25, 5)) == 3
     assert zones.locate((35, 5)) == 4
-    assert zones.locate((45, 5)) == 5   # 반대 끝 구역
+    assert zones.locate((45, 5)) == 5
 
 
 def test_locate_outside_returns_none():
@@ -60,17 +51,12 @@ def test_locate_outside_returns_none():
     assert zones.locate((100, 100)) is None
 
 
-# --- 사선 구도에서의 구역 분할 (원근 보정) ---
-# 화면상 균등 분할은 실제 거리로는 균등하지 않다. 실측 치수가 있으면 평면 좌표(cm)에서
-# 나눈 뒤 픽셀로 되돌려야 각 구역이 실제로 같은 거리를 담당한다.
-
 def test_zones_are_equal_in_real_distance_with_dimensions():
     zones = CrosswalkZones.from_quad(
         OBLIQUE_QUAD, n=5, width_cm=OBLIQUE_W_CM, length_cm=OBLIQUE_L_CM
     )
     boundaries = _zone_boundaries_cm(zones, zones.ground_plane)
 
-    # 구역 경계가 200, 400, 600, 800, 1000 cm 에 정확히 놓여야 한다.
     assert boundaries == pytest.approx([200.0, 400.0, 600.0, 800.0, 1000.0], abs=1e-3)
 
 
@@ -95,15 +81,13 @@ def test_pixel_split_is_uneven_without_dimensions():
     실측 치수를 넣어야 한다는 근거다.
     """
     zones = CrosswalkZones.from_quad(OBLIQUE_QUAD, n=5)
-    assert zones.ground_plane is None  # 치수가 없으니 호모그래피도 없다
+    assert zones.ground_plane is None
 
     reference = GroundPlane.from_quad(OBLIQUE_QUAD, OBLIQUE_W_CM, OBLIQUE_L_CM)
     boundaries = _zone_boundaries_cm(zones, reference)
     lengths = [b - a for a, b in zip([0.0] + boundaries, boundaries)]
 
-    # 가장 먼 구역이 가장 가까운 구역보다 5배 이상 길다.
     assert max(lengths) > min(lengths) * 5
-    # 그리고 실제 한가운데가 3번이 아닌 더 뒤쪽 구역에 들어간다.
     assert zones.locate(reference.to_pixel((OBLIQUE_W_CM / 2, OBLIQUE_L_CM / 2))) == 4
 
 
@@ -115,30 +99,26 @@ def test_zone_count_and_coverage_unchanged_by_correction():
     assert len(zones) == 5
 
     gp = zones.ground_plane
-    # 양 끝과 중간 지점들이 빠짐없이 어느 구역엔가 속한다.
     for y_cm in [1.0, 199.0, 201.0, 500.0, 999.0]:
         assert zones.locate(gp.to_pixel((OBLIQUE_W_CM / 2, y_cm))) is not None
-    # 횡단보도 밖(뒤쪽)은 어느 구역에도 속하지 않는다.
     assert zones.locate(gp.to_pixel((OBLIQUE_W_CM / 2, -50.0))) is None
 
-
-# --- CrosswalkOccupancy (확정 보행자/점유 구역) ---
 
 def test_occupancy_requires_consecutive_frames():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     occ = CrosswalkOccupancy(zones, confirm_frames=3)
 
-    assert occ.update([("p1", (25, 5))]) == {}       # 1프레임
-    assert occ.update([("p1", (25, 5))]) == {}       # 2프레임
-    assert occ.update([("p1", (25, 5))]) == {"p1": 3}  # 3프레임 -> 확정, 3번 구역
+    assert occ.update([("p1", (25, 5))]) == {}
+    assert occ.update([("p1", (25, 5))]) == {}
+    assert occ.update([("p1", (25, 5))]) == {"p1": 3}
 
 
 def test_occupancy_tracks_moving_pedestrian_zone():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     occ = CrosswalkOccupancy(zones, confirm_frames=1)
 
-    occ.update([("p1", (5, 5))])    # 1번 구역
-    result = occ.update([("p1", (25, 5))])  # 3번 구역으로 이동
+    occ.update([("p1", (5, 5))])
+    result = occ.update([("p1", (25, 5))])
     assert result == {"p1": 3}
     assert occ.occupied_zones() == [3]
 
@@ -148,8 +128,8 @@ def test_occupancy_resets_when_leaving_crosswalk():
     occ = CrosswalkOccupancy(zones, confirm_frames=2)
 
     occ.update([("p1", (25, 5))])
-    occ.update([("p1", (100, 100))])  # 횡단보도 이탈 -> 리셋
-    assert occ.update([("p1", (25, 5))]) == {}  # 다시 처음부터
+    occ.update([("p1", (100, 100))])
+    assert occ.update([("p1", (25, 5))]) == {}
 
 
 def test_occupancy_missing_config_raises(monkeypatch):
@@ -164,21 +144,16 @@ def test_occupancy_missing_config_raises(monkeypatch):
         CrosswalkOccupancy(zones, confirm_frames=None)
 
 
-# --- 미검출 유예 (config.TRACK_GRACE_FRAMES) ---
-#
-# YOLO는 가림·모션블러·저조도에서 한두 프레임씩 사람을 놓친다. 그때마다 잔류 카운트를
-# 0으로 되돌리면 확정 보행자가 영영 안 나오고, 에러 없이 조용히 연장만 빠진다.
-
 def test_occupancy_tolerates_brief_detection_gap():
     """유예 안의 깜빡임은 카운트를 잃지 않고 이어간다."""
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     occ = CrosswalkOccupancy(zones, confirm_frames=3, grace_frames=2)
 
-    occ.update([("p1", (25, 5))])                      # count 1
-    occ.update([])                                     # 미검출 1
-    occ.update([])                                     # 미검출 2 (유예 이내)
-    assert occ.update([("p1", (25, 5))]) == {}         # count 2 — 이어서 셈
-    assert occ.update([("p1", (25, 5))]) == {"p1": 3}  # count 3 -> 확정
+    occ.update([("p1", (25, 5))])
+    occ.update([])
+    occ.update([])
+    assert occ.update([("p1", (25, 5))]) == {}
+    assert occ.update([("p1", (25, 5))]) == {"p1": 3}
 
 
 def test_occupancy_freezes_count_during_gap():
@@ -186,9 +161,9 @@ def test_occupancy_freezes_count_during_gap():
     zones = CrosswalkZones.from_quad(QUAD, n=5)
     occ = CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=2)
 
-    occ.update([("p1", (25, 5))])                      # count 1
-    assert occ.update([]) == {}                        # 미검출 — 여기서 확정되면 안 된다
-    assert occ.update([("p1", (25, 5))]) == {"p1": 3}  # count 2 -> 확정
+    occ.update([("p1", (25, 5))])
+    assert occ.update([]) == {}
+    assert occ.update([("p1", (25, 5))]) == {"p1": 3}
 
 
 def test_occupancy_drops_track_after_grace_expires():
@@ -199,8 +174,8 @@ def test_occupancy_drops_track_after_grace_expires():
     occ.update([("p1", (25, 5))])
     occ.update([])
     occ.update([])
-    occ.update([])                                     # 미검출 3 > 유예 2 -> 삭제
-    assert occ.update([("p1", (25, 5))]) == {}         # 처음부터 다시
+    occ.update([])
+    assert occ.update([("p1", (25, 5))]) == {}
 
 
 def test_occupancy_confirmed_pedestrian_survives_gap():
@@ -209,7 +184,7 @@ def test_occupancy_confirmed_pedestrian_survives_gap():
     occ = CrosswalkOccupancy(zones, confirm_frames=1, grace_frames=2)
 
     assert occ.update([("p1", (25, 5))]) == {"p1": 3}
-    assert occ.update([]) == {"p1": 3}                 # 미검출이어도 확정 유지
+    assert occ.update([]) == {"p1": 3}
     assert occ.occupied_zones() == [3]
 
 
@@ -223,7 +198,7 @@ def test_occupancy_zone_exit_ignores_grace():
     occ = CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=2)
 
     occ.update([("p1", (25, 5))])
-    occ.update([("p1", (100, 100))])                   # 횡단보도 밖 -> 즉시 리셋
+    occ.update([("p1", (100, 100))])
     assert occ.update([("p1", (25, 5))]) == {}
 
 
@@ -242,8 +217,6 @@ def test_occupancy_rejects_negative_grace():
     with pytest.raises(ValueError):
         CrosswalkOccupancy(zones, confirm_frames=2, grace_frames=-1)
 
-
-# --- 캘리브레이션 해상도 검증 (버그 C) ---
 
 def _write_zone_config(tmp_path, **extra):
     payload = {
@@ -293,8 +266,6 @@ def test_load_uses_config_resolution_by_default(tmp_path, monkeypatch):
         CrosswalkZones.load(path)
 
 
-# --- 추적 ID가 없는 검출 (버그 D) ---
-
 def test_occupancy_ignores_untracked_detections():
     """track_id=None인 검출은 잔류 판정에서 제외한다 (SpeedEstimator와 동일한 규칙).
 
@@ -332,12 +303,6 @@ def test_untracked_detection_does_not_disturb_tracked_one():
     assert occ.update([("p1", (25, 5)), (None, (25, 5))]) == {"p1": 3}
 
 
-# --- 진척도 (CrossingProgress) ---
-#
-# 물리 구역 번호는 좌표계 기준이라 진입 방향에 따라 의미가 뒤집힌다.
-# 반대편에서 들어온 사람의 '2번'은 '거의 다 건넜음'인데, 보정하지 않으면
-# '대부분 남았음'으로 읽혀 엉뚱한 사람이 최솟값을 차지한다.
-
 def test_progress_matches_zone_for_forward_entry():
     """1·2번에서 처음 보이면 정방향 — 진척도가 구역 번호와 같다."""
     p = CrossingProgress(zone_count=5)
@@ -350,20 +315,20 @@ def test_progress_matches_zone_for_forward_entry():
 def test_progress_is_mirrored_for_reverse_entry():
     """4·5번에서 처음 보이면 역방향 — 진척도가 뒤집힌다."""
     p = CrossingProgress(zone_count=5)
-    assert p.update("b", 5) == 1        # 방금 진입
+    assert p.update("b", 5) == 1
     assert p.update("b", 4) == 2
-    assert p.update("b", 2) == 4        # 거의 다 건넜음
+    assert p.update("b", 2) == 4
     assert p.direction("b") == -1
 
 
 def test_opposite_directions_at_same_physical_zone():
     """같은 물리 2번 구역이라도 방향이 다르면 진척도가 다르다 — 이 클래스의 존재 이유."""
     p = CrossingProgress(zone_count=5)
-    p.update("fwd", 1)                  # 정방향으로 진입
-    p.update("rev", 5)                  # 역방향으로 진입
+    p.update("fwd", 1)
+    p.update("rev", 5)
 
-    assert p.update("fwd", 2) == 2      # 대부분 남음
-    assert p.update("rev", 2) == 4      # 거의 다 건넘
+    assert p.update("fwd", 2) == 2
+    assert p.update("rev", 2) == 4
 
 
 def test_middle_start_is_treated_as_middle():
@@ -385,7 +350,7 @@ def test_middle_start_resolves_on_first_move():
 
     reverse = CrossingProgress(zone_count=5)
     reverse.update("e", 3)
-    assert reverse.update("e", 2) == 4      # 6 - 2
+    assert reverse.update("e", 2) == 4
     assert reverse.direction("e") == -1
 
 
@@ -394,7 +359,7 @@ def test_direction_is_latched_not_recomputed():
     p = CrossingProgress(zone_count=5)
     p.update("f", 1)
     p.update("f", 3)
-    assert p.update("f", 2) == 2        # 잠깐 뒤로 밀려도 여전히 정방향
+    assert p.update("f", 2) == 2
     assert p.direction("f") == 1
 
 
@@ -406,7 +371,7 @@ def test_forget_clears_direction():
 
     p.forget("g")
     assert p.direction("g") is None
-    assert p.update("g", 1) == 1        # 새 사람으로 다시 시작
+    assert p.update("g", 1) == 1
     assert p.direction("g") == 1
 
 
@@ -419,16 +384,6 @@ def test_keep_only_drops_missing_tracks():
     assert p.direction("h") == 1
     assert p.direction("i") is None
 
-
-# --- track_id 재발급 상속 ---
-#
-# ByteTrack은 가림·모션블러에서 같은 사람에게 새 ID를 준다. 그러면 잔류 카운트가 0으로
-# 돌아갈 뿐 아니라 **CrossingProgress의 진입 방향이 통째로 날아간다.** 방향을 잃으면
-# 거의 다 건넌 사람(구역 4)이 "방금 진입"(진척도 2)으로 보고돼 아두이노가 연장을 다시
-# 시작한다 — 재확정 지연(0.25초)보다 이쪽이 훨씬 비싸다.
-#
-# 쓰러짐 감지에는 이미 같은 보정이 있다(FallTracker._resolve_keys). 그쪽은 bbox 겹침으로
-# 맞추지만 여기는 발 위치만 받으므로 **거리**로 맞춘다 — 구역 판정 기준과 같은 좌표다.
 
 def _occupancy(confirm_frames=2, grace_frames=2, inherit_distance=5, **kwargs):
     """QUAD는 실측 치수가 없어 호모그래피가 없다 -> 거리 단위가 픽셀이다.
@@ -449,7 +404,7 @@ def test_new_id_near_lost_track_inherits_its_count():
     occ.update([(1, (26, 5))])
     assert 1 in occ.confirmed()
 
-    occ.update([(7, (27, 5))])          # 같은 자리, 새 ID
+    occ.update([(7, (27, 5))])
     confirmed = occ.confirmed()
     assert 7 in confirmed
     assert 1 not in confirmed, "옛 ID가 남아 유령 보행자가 되면 안 된다"
@@ -475,7 +430,7 @@ def test_distant_new_id_is_a_different_person():
     occ.update([(1, (5, 5))])
     occ.update([(1, (5, 5))])
 
-    occ.update([(7, (45, 5))])          # 횡단보도 반대쪽 끝
+    occ.update([(7, (45, 5))])
     assert occ.rekeyed == []
     assert 7 not in occ.confirmed()
 
@@ -490,7 +445,7 @@ def test_visible_track_is_not_robbed():
     occ.update([(1, (25, 5))])
     occ.update([(1, (25, 5))])
 
-    occ.update([(1, (25, 5)), (7, (26, 5))])   # 1번은 이번 프레임에도 보인다
+    occ.update([(1, (25, 5)), (7, (26, 5))])
     assert occ.rekeyed == []
     assert 1 in occ.confirmed()
 
@@ -500,8 +455,8 @@ def test_expired_track_is_not_inherited():
     occ = _occupancy(grace_frames=1)
     occ.update([(1, (25, 5))])
     occ.update([(1, (25, 5))])
-    occ.update([])                      # miss 1 — 아직 유예 안
-    occ.update([])                      # miss 2 > grace -> 폐기
+    occ.update([])
+    occ.update([])
 
     occ.update([(7, (25, 5))])
     assert occ.rekeyed == []
@@ -513,7 +468,7 @@ def test_one_lost_track_is_claimed_by_the_nearest_detection_only():
     occ.update([(1, (25, 5))])
     occ.update([(1, (25, 5))])
 
-    occ.update([(7, (26, 5)), (8, (28, 5))])   # 둘 다 근처
+    occ.update([(7, (26, 5)), (8, (28, 5))])
     assert occ.rekeyed == [(1, 7)], "가장 가까운 검출 하나만 물려받는다"
     assert 8 not in occ.confirmed()
 
@@ -528,7 +483,6 @@ def test_id_collision_does_not_clobber_existing_state():
     occ.update([(1, (5, 5)), (2, (25, 5))])
     occ.update([(1, (5, 5)), (2, (25, 5))])
 
-    # 1번이 사라지고, 그 자리에 '2'라는 이미 쓰이는 번호로 검출됐다(비정상이지만 방어).
     occ.update([(2, (25, 5))])
     assert 2 in occ.confirmed()
     assert occ.rekeyed == []
@@ -543,8 +497,6 @@ def test_inheritance_can_be_disabled():
     assert occ.rekeyed == []
 
 
-# --- CrossingProgress.rekey ---
-
 def test_progress_rekey_preserves_direction():
     """★ 방향이 유지되면 진척도가 뒤집히지 않는다."""
     progress = CrossingProgress(zone_count=5)
@@ -553,8 +505,8 @@ def test_progress_rekey_preserves_direction():
 
     progress.rekey(1, 7)
     assert progress.direction(7) == 1
-    assert progress.update(7, 4) == 4      # 상속이 없으면 2가 나온다
-    assert progress.update(7, 5) == 5      # 상속이 없으면 1이 나온다
+    assert progress.update(7, 4) == 4
+    assert progress.update(7, 5) == 5
 
 
 def test_progress_rekey_forgets_the_old_id():
@@ -566,8 +518,8 @@ def test_progress_rekey_forgets_the_old_id():
 
 def test_progress_rekey_does_not_clobber_an_existing_id():
     progress = CrossingProgress(zone_count=5)
-    progress.update(1, 1)                  # 정방향
-    progress.update(2, 5)                  # 역방향
+    progress.update(1, 1)
+    progress.update(2, 5)
     progress.rekey(1, 2)
     assert progress.direction(2) == -1, "이미 쓰이는 ID의 방향을 덮어쓰면 안 된다"
 

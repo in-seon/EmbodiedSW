@@ -48,7 +48,7 @@ class _FakeModel:
 
 
 def _detector_with(result):
-    detector = PersonDetector.__new__(PersonDetector)   # __init__ 우회(가중치 로드 회피)
+    detector = PersonDetector.__new__(PersonDetector)
     detector._model = _FakeModel(result)
     detector._class_names = detector._model.names
     detector._class_ids = [0]

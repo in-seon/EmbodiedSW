@@ -14,12 +14,8 @@ from src.pipeline import FallAlarmPipeline
 from src.serial_comm import STATE_FALL, STATE_NORMAL
 
 FRAME = np.zeros((480, 640, 3), dtype=np.uint8)
-# config.FALL_CONFIG["crosswalk_roi"] = (0.15, 0.30, 0.85, 0.95) -> 640x480에서 (96,144)~(544,456)
 ROI = (96, 144, 544, 456)
 
-# 아래 시나리오가 "3초 유지 -> ALERT", "3초 정상 -> STOP" 타임라인에 기대고 있으므로
-# 시간 파라미터는 테스트가 소유한다. 그래야 config.FALL_CONFIG 튜닝이 배선 테스트를
-# 깨뜨리지 않는다(test_fall_detection.py의 CFG와 같은 이유).
 CFG = dict(config.FALL_CONFIG, fall_confirm_sec=3.0, fall_clear_sec=3.0)
 
 
@@ -78,7 +74,7 @@ def fallen(track_id=1):
 def build(frames, serial=None):
     spy = serial if serial is not None else SpySerial()
     pipeline = FallAlarmPipeline(
-        camera=object(),                 # run()을 쓰지 않으므로 필요 없다
+        camera=object(),
         detector=FakeDetector(frames),
         serial_comm=spy,
         roi_px=ROI,
@@ -112,7 +108,7 @@ def test_sustained_fall_sends_alert_once():
         result = pipeline.process_frame(FRAME, now=t)
 
     assert result.fall_confirmed is True
-    assert spy.commands == [STATE_NORMAL, STATE_FALL]      # 매 프레임 보내지 않는다
+    assert spy.commands == [STATE_NORMAL, STATE_FALL]
 
 
 def test_getting_up_sends_stop():
@@ -136,7 +132,7 @@ def test_alarm_survives_brief_detection_gap():
         result = pipeline.process_frame(FRAME, now=t)
 
     assert result.fall_confirmed is True
-    assert spy.commands == [STATE_NORMAL, STATE_FALL]      # 중간에 STOP이 끼면 안 된다
+    assert spy.commands == [STATE_NORMAL, STATE_FALL]
 
 
 def test_reset_alarm_clears_state_and_buzzer():
@@ -147,7 +143,6 @@ def test_reset_alarm_clears_state_and_buzzer():
 
     pipeline.reset_alarm()
     assert spy.commands == [STATE_NORMAL, STATE_FALL, STATE_NORMAL]
-    # 누적도 지워졌으므로 다시 3초를 채워야 한다.
     assert pipeline.process_frame(FRAME, now=4.0).fall_confirmed is False
 
 
