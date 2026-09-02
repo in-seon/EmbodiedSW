@@ -70,7 +70,8 @@ def foot_in_roi(person: Person, roi_px) -> bool:
     """발 위치(bbox 하단 중앙)가 횡단보도 ROI 안인가 — **신호 연장 판단용**.
     서 있고 걷는 사람의 '어디에 있나'는 발이 가장 정확하다."""
     x1, y1, x2, y2 = person.bbox
-    foot_x, foot_y = (x1 + x2) / 2, y2
+    foot_x = (x1 + x2) / 2
+    foot_y = y2 - config.FOOT_POINT_OFFSET_RATIO * (y2 - y1)
     rx1, ry1, rx2, ry2 = roi_px
     return rx1 <= foot_x <= rx2 and ry1 <= foot_y <= ry2
 

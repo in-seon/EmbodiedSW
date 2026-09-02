@@ -30,10 +30,12 @@ ZONE_EXT = {1: 0, 2: 3, 3: 5, 4: 3, 5: 0}
 def box_at(foot_x, foot_y, track_id, label="person", height=40):
     """발 위치가 (foot_x, foot_y)에 오도록 BoundingBox를 만든다.
 
-    foot_point()는 (하단 모서리 중심) = ((x1+x2)/2, y2) 이므로 그에 맞춰 역산한다.
+    foot_point()는 하단에서 config.FOOT_POINT_OFFSET_RATIO 만큼 올라온 지점이므로
+    y2 = foot_y + 비율 x 높이 로 역산한다.
     """
+    y2 = foot_y + config.FOOT_POINT_OFFSET_RATIO * height
     return BoundingBox(
-        x1=foot_x - 10, y1=foot_y - height, x2=foot_x + 10, y2=foot_y,
+        x1=foot_x - 10, y1=y2 - height, x2=foot_x + 10, y2=y2,
         confidence=0.9, label=label, track_id=track_id,
     )
 
@@ -83,12 +85,12 @@ def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH
 def test_uses_foot_point_not_center_for_zone():
     """박스 중심과 발 위치가 서로 다른 구역에 걸치면, 발 위치 쪽이 채택돼야 한다.
 
-    발이 y=100(3번 구역), 중심은 y=70(2번 구역)이 되도록 키 큰 박스를 만든다.
+    발이 y=100(3번 구역), 중심은 y=76(2번 구역)이 되도록 키 큰 박스를 만든다.
     사선 카메라에서 중심점을 쓰면 실제보다 카메라 쪽으로 당겨져 판정된다(CLAUDE.md 2.1).
     """
     box = box_at(50, 100, track_id=1, height=60)
     assert box.foot_point() == (50, 100)
-    assert box.center_point() == (50, 70)
+    assert box.center_point() == (50, 76)
 
     pipeline = build_pipeline([[box]])
     result = pipeline.process_frame(frame=None, timestamp=0.0)

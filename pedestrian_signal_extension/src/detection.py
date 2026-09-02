@@ -16,7 +16,8 @@ class BoundingBox:
     keypoints: object = None
 
     def foot_point(self):
-        return ((self.x1 + self.x2) / 2, self.y2)
+        return ((self.x1 + self.x2) / 2,
+                self.y2 - config.FOOT_POINT_OFFSET_RATIO * (self.y2 - self.y1))
 
     def center_point(self):
         return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
