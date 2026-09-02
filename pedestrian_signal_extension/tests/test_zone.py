@@ -61,7 +61,7 @@ def test_zones_are_equal_in_real_distance_with_dimensions():
 
 
 def test_true_center_of_crosswalk_lands_in_middle_zone():
-    """설계 전제 그 자체 — '정중앙에 있으면 가장 길게 연장'(CLAUDE.md 2.4).
+    """설계 전제 그 자체 — '정중앙에 있으면 가장 길게 연장'.
 
     실제 한가운데(500cm)가 3번 구역에 있어야 그 규칙이 의미를 갖는다.
     화면상 분할로는 4번 구역에 들어가 규칙이 엉뚱한 위치에 적용된다.

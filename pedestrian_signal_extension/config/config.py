@@ -37,9 +37,9 @@ DETECTION_IMGSZ = 320
 
 CAMERA_SOURCE = "picamera2"
 CAMERA_RESOLUTION = (640, 480)
-CAMERA_MOUNT_ANGLE_DEG = None   
+CAMERA_MOUNT_ANGLE_DEG = None #자동 측정   
 
-SERIAL_PORT = None     
+SERIAL_PORT = None #자동 탐색
 SERIAL_BAUDRATE = 115200   
 SERIAL_MESSAGE_FORMAT = "ascii-lines"
 SERIAL_READY_TIMEOUT_SEC = 5.0
@@ -49,7 +49,7 @@ SERIAL_STATE_HEARTBEAT_SEC = 1.0
 
 FALL_CONFIG = {
     "crosswalk_roi": (0.15, 0.30, 0.85, 0.95),
-    "fall_angle_deg": 20.0,      
+    "fall_angle_deg": 10.0,      
     "fall_confirm_sec": 0.0,     
     "fall_gap_sec": 1.0,         
     "fall_gap_frames": 2,                                    

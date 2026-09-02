@@ -2,7 +2,7 @@
 
 파이 쪽에 남은 판단은 "가장 덜 건넌 사람이 몇 번째인가" 하나뿐이다.
 얼마나 연장할지는 제어부(아두이노)가 기준표와 잔여 시간을 비교해 정한다
-(src/signal_extend.py 모듈 docstring, docs/team_interface.md 참고).
+(src/signal_extend.py 모듈 docstring, README.md 참고).
 """
 
 from src.signal_extend import Occupant, maximum_eta_sec, minimum_progress

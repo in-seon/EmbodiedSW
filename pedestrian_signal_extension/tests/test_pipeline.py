@@ -7,7 +7,7 @@
 
 잔여 시간 임계값, 누적 상한, 엣지 트리거, 사이클 리셋은 **제어부(아두이노)로 옮겨갔다.**
 프로토콜을 4상태로 단순화하면서 파이는 "무엇을 보았는가"만 보내게 됐기 때문이다.
-그 로직의 근거와 아두이노 쪽 주의사항은 docs/team_interface.md 에 있다.
+그 로직의 근거와 아두이노 쪽 주의사항은 README.md 에 있다.
 """
 
 import pytest
@@ -84,7 +84,7 @@ def test_uses_foot_point_not_center_for_zone():
     """박스 중심과 발 위치가 서로 다른 구역에 걸치면, 발 위치 쪽이 채택돼야 한다.
 
     발이 y=100(3번 구역), 중심은 y=76(2번 구역)이 되도록 키 큰 박스를 만든다.
-    사선 카메라에서 중심점을 쓰면 실제보다 카메라 쪽으로 당겨져 판정된다(CLAUDE.md 2.1).
+    사선 카메라에서 중심점을 쓰면 실제보다 카메라 쪽으로 당겨져 판정된다.
     """
     box = box_at(50, 100, track_id=1, height=60)
     assert box.foot_point() == (50, 100)
@@ -277,7 +277,7 @@ def test_zone_resumes_immediately_after_fall_without_normal():
     """쓰러졌다 일어나 횡단보도에 남으면 FALL -> ZONE 으로 바로 넘어간다 (NORMAL이 끼지 않는다).
 
     아두이노가 "normal을 받아야 부저를 끈다"로 짜면 이 구간에서 부저가 영영 울린다.
-    계약은 `부저 = (마지막 상태 == FALL)` 이다 — docs/team_interface.md 참고.
+    계약은 `부저 = (마지막 상태 == fall)` 이다 — README.md 참고.
     """
     boxes = [box_at(50, 100, 1)]
     serial = FakeSerial()
