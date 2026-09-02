@@ -13,7 +13,7 @@ def _weight_path(name: str) -> str:
 
 
 CROSSWALK_ZONE_COUNT = 5
-ZONE_RESIDENCY_FRAMES = 2
+ZONE_RESIDENCY_FRAMES = 1
 ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "data" / "zone_config.json")
 TRACK_GRACE_FRAMES = 5  
 
@@ -31,7 +31,7 @@ SPEED_STOPPED_THRESHOLD_CM_S = 0.5
 PEDESTRIAN_LABEL = "person"    
 FOOT_POINT_OFFSET_RATIO = 0.1
 DETECTION_MODEL_PATH = _weight_path("yolov8n-pose.pt")  
-DETECTION_CONFIDENCE_THRESHOLD = 0.2
+DETECTION_CONFIDENCE_THRESHOLD = 0.1
 DETECTION_TRACKER = "bytetrack.yaml"
 DETECTION_IMGSZ = 320
 
@@ -50,7 +50,7 @@ SERIAL_STATE_HEARTBEAT_SEC = 1.0
 FALL_CONFIG = {
     "crosswalk_roi": (0.15, 0.30, 0.85, 0.95),
     "fall_angle_deg": 10.0,      
-    "fall_confirm_sec": 0.0,     
+    "fall_confirm_sec": 2.0,     
     "fall_gap_sec": 1.0,         
     "fall_gap_frames": 2,                                    
     "fall_gap_max_sec": 4.0,     
