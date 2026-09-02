@@ -1,7 +1,5 @@
 """SerialComm 단위 테스트.
 
-가짜 시리얼 객체를 주입해 아두이노 없이 프로토콜 동작을 검증한다.
-시각(now)도 인자로 넣을 수 있어 하트비트 주기를 실시간 대기 없이 확인한다.
 """
 
 import pytest
@@ -65,7 +63,6 @@ def test_open_waits_for_ready():
 
 
 def test_open_falls_back_to_ping_when_no_ready():
-    """DTR 자동 리셋이 없어 READY가 안 오는 보드도 PING/PONG으로 확인된다."""
     fake = FakeSerial()
     comm = SerialComm(connection=fake, ready_timeout_sec=0.05)
 
@@ -85,14 +82,12 @@ def test_open_falls_back_to_ping_when_no_ready():
 
 
 def test_open_raises_when_board_silent():
-    """응답이 전혀 없으면 조용히 진행하지 않고 실패시킨다."""
     comm, _ = make_comm(ready_timeout_sec=0.05)
     with pytest.raises(RuntimeError, match="응답하지 않습니다"):
         comm.open()
 
 
 def test_missing_baudrate_raises(monkeypatch):
-    """config가 비어 있으면 임의값으로 열지 않고 명시적으로 실패한다."""
     from config import config as cfg
 
     monkeypatch.setattr(cfg, "SERIAL_BAUDRATE", None)
@@ -121,7 +116,6 @@ def test_state_change_sends_immediately():
 
 
 def test_zone_change_counts_as_change():
-    """진척도 3 -> 5는 다른 상황이다. 상태 이름만 비교하면 이 변화를 놓친다."""
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 
@@ -131,10 +125,6 @@ def test_zone_change_counts_as_change():
 
 
 def test_same_zone_does_not_resend():
-    """진척도가 그대로면 재전송하지 않는다 (하트비트 전까지).
-
-    사람이 움직여도 같은 진척도 안에 머무르면 아두이노 입장에서 같은 상황이다.
-    """
     comm, fake = make_comm("READY", heartbeat_sec=10.0)
     comm.open()
 

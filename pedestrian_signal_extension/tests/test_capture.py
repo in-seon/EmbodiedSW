@@ -1,9 +1,4 @@
-"""CameraCapture 백엔드 선택 테스트.
-
-실제 카메라를 열지 않고 "어느 백엔드가 골라지는가"만 검증한다. picamera2는 라즈베리파이에만
-설치되므로 PC에서도 돌아야 하는 이 테스트는 import를 유발하지 않는다
-(_Picamera2Backend는 open() 시점에 지연 import 한다).
-"""
+"""CameraCapture 백엔드 선택 테스트."""
 
 import numpy as np
 import pytest
@@ -25,12 +20,10 @@ def test_stream_url_uses_cv2():
 
 
 def test_picamera2_source_uses_picamera2():
-    """라즈베리파이 5 + Bookworm에서 CSI 카메라를 쓰는 경로."""
     assert CameraCapture(source=PICAMERA2_SOURCE).backend_name == "picamera2"
 
 
 def test_picamera2_source_is_case_and_space_insensitive():
-    """config에 손으로 적는 값이라 대소문자/공백에 걸려 넘어지지 않게 한다."""
     for value in ["picamera2", "PiCamera2", "PICAMERA2", "  picamera2  "]:
         assert _is_picamera2_source(value) is True, value
 

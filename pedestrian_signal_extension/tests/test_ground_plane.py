@@ -1,5 +1,4 @@
 """GroundPlane(호모그래피) 단위 테스트.
-
 카메라·모델 없이 좌표 계산만 검증한다.
 """
 
@@ -63,12 +62,6 @@ def test_trapezoid_corners_map_to_rectangle_corners():
 
 
 def test_perspective_correction_beats_raw_pixels():
-    """이 테스트가 호모그래피를 쓰는 이유 그 자체다.
-
-    사다리꼴에서 '가까운 쪽 절반'과 '먼 쪽 절반'은 화면상 픽셀 높이가 크게 다르지만
-    (75px vs 75px 로 같아 보여도 실제 폭 축소 때문에 실거리 비율이 다르다), 평면 좌표로
-    펴고 나면 두 구간의 실거리가 같아야 한다.
-    """
     plane = GroundPlane.from_quad(TRAPEZOID_PX, TRAP_W_CM, TRAP_L_CM)
 
     near = plane.to_ground((50, 200))
@@ -83,7 +76,7 @@ def test_perspective_correction_beats_raw_pixels():
 
 
 def test_to_pixel_is_inverse_of_to_ground():
-    """평면 -> 픽셀 역변환. 구역을 실제 거리로 나눈 뒤 화면에 되돌릴 때 쓴다."""
+    """평면 -> 픽셀 역변환. """
     plane = GroundPlane.from_quad(TRAPEZOID_PX, TRAP_W_CM, TRAP_L_CM)
     for px_point in [(50, 120), (35, 60), (95, 195), (10, 199)]:
         ground = plane.to_ground(px_point)

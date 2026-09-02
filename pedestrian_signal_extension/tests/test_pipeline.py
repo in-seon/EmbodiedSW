@@ -1,14 +1,4 @@
-"""파이프라인 배선 테스트.
-
-검출기·카메라·시리얼을 가짜로 주입해, 실제 모델이나 하드웨어 없이
-"검출 -> 발 위치 -> 구역 판정 / 속도 추정 -> 상태 요약 -> 전송" 흐름을 확인한다.
-
-## 여기서 더 이상 검증하지 않는 것
-
-잔여 시간 임계값, 누적 상한, 엣지 트리거, 사이클 리셋은 **제어부(아두이노)로 옮겨갔다.**
-프로토콜을 4상태로 단순화하면서 파이는 "무엇을 보았는가"만 보내게 됐기 때문이다.
-그 로직의 근거와 아두이노 쪽 주의사항은 README.md 에 있다.
-"""
+"""파이프라인 배선 테스트."""
 
 import pytest
 
@@ -27,11 +17,6 @@ ZONE_EXT = {1: 0, 2: 3, 3: 5, 4: 3, 5: 0}
 
 
 def box_at(foot_x, foot_y, track_id, label="person", height=40):
-    """발 위치가 (foot_x, foot_y)에 오도록 BoundingBox를 만든다.
-
-    foot_point()는 하단에서 config.FOOT_POINT_OFFSET_RATIO 만큼 올라온 지점이므로
-    y2 = foot_y + 비율 x 높이 로 역산한다.
-    """
     y2 = foot_y + config.FOOT_POINT_OFFSET_RATIO * height
     return BoundingBox(
         x1=foot_x - 10, y1=y2 - height, x2=foot_x + 10, y2=y2,
@@ -40,7 +25,6 @@ def box_at(foot_x, foot_y, track_id, label="person", height=40):
 
 
 class FakeDetector:
-    """프레임 대신 미리 정한 박스 목록을 순서대로 내놓는다."""
 
     def __init__(self, frames):
         self.frames = list(frames)
@@ -53,7 +37,6 @@ class FakeDetector:
 
 
 class FakeSerial:
-    """보낸 줄을 기록한다. 실제 SerialComm의 변화 감지/하트비트까지 흉내내지는 않는다."""
 
     def __init__(self):
         self.states = []
@@ -81,11 +64,6 @@ def build_pipeline(frames, confirm_frames=1, width_cm=WIDTH_CM, length_cm=LENGTH
 
 
 def test_uses_foot_point_not_center_for_zone():
-    """박스 중심과 발 위치가 서로 다른 구역에 걸치면, 발 위치 쪽이 채택돼야 한다.
-
-    발이 y=100(3번 구역), 중심은 y=76(2번 구역)이 되도록 키 큰 박스를 만든다.
-    사선 카메라에서 중심점을 쓰면 실제보다 카메라 쪽으로 당겨져 판정된다.
-    """
     box = box_at(50, 100, track_id=1, height=60)
     assert box.foot_point() == (50, 100)
     assert box.center_point() == (50, 76)
@@ -104,7 +82,6 @@ def test_physical_zone_is_reported(foot_y, zone):
 
 
 def test_forward_entry_progress_equals_zone():
-    """1번에서 진입하면 진척도가 구역 번호와 같다."""
     frames = [[box_at(50, 10, 1)], [box_at(50, 100, 1)]]
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
@@ -114,7 +91,6 @@ def test_forward_entry_progress_equals_zone():
 
 
 def test_reverse_entry_progress_is_mirrored():
-    """5번에서 진입하면 진척도가 뒤집힌다 — 물리 2번이 진척도 4가 된다."""
     frames = [[box_at(50, 190, 1)], [box_at(50, 50, 1)]]
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
@@ -125,9 +101,8 @@ def test_reverse_entry_progress_is_mirrored():
 
 
 def test_opposite_directions_send_the_least_advanced():
-    """반대 방향 두 사람이 같은 물리 구역에 있어도, 덜 건넌 쪽이 선택된다.
-
-    보정하지 않으면 둘 다 '2번'이라 구분되지 않는다 — 이 파이프라인의 핵심 요구사항.
+    """반대 방향 두 사람이 같은 물리 구역에 있어도, 덜 건넌 쪽이 선택됨.
+    보정하지 않으면 둘 다 '2번'이라 구분되지 않음.
     """
     enter = [box_at(50, 10, 1), box_at(60, 190, 2)]
     both_at_zone2 = [box_at(50, 50, 1), box_at(60, 50, 2)]
@@ -167,7 +142,6 @@ def test_outside_crosswalk_is_not_counted():
 
 def test_residency_gate_blocks_until_confirmed():
     """잔류 프레임 수를 못 채운 검출은 진척도를 만들지 않는다.
-
     방향 래치도 확정 후에만 걸린다 — 스쳐가는 오검출로 방향이 잘못 굳는 것을 막는다.
     """
     frames = [[box_at(50, 100, track_id=1)]] * 3
@@ -179,7 +153,6 @@ def test_residency_gate_blocks_until_confirmed():
 
 
 def test_eta_is_measured_but_does_not_change_the_sent_value():
-    """ETA는 계측용이다. 있든 없든 보내는 진척도는 같아야 한다."""
     frames = [[box_at(50, 10, 1)], [box_at(50, 100, 1)]]
     pipeline = build_pipeline(frames)
     pipeline.process_frame(None, timestamp=0.0)
@@ -190,10 +163,6 @@ def test_eta_is_measured_but_does_not_change_the_sent_value():
 
 
 def test_standing_person_still_reports_progress():
-    """서 있는 사람은 ETA가 없지만 진척도는 나온다 — 연장 판단이 속도에 의존하지 않는다.
-
-    예전 방식에서는 여기서 ETA가 None이라 폴백이 필요했다. 지금은 폴백 자체가 없다.
-    """
     frames = [[box_at(50, 100, 1)]] * 3
     pipeline = build_pipeline(frames)
     for t in (0.0, 1.0, 2.0):
@@ -203,14 +172,12 @@ def test_standing_person_still_reports_progress():
 
 
 def test_process_boxes_does_not_call_detector():
-    """CombinedPipeline이 쓰는 진입점 — 여기서 다시 검출하면 추론이 2배가 된다."""
     pipeline = build_pipeline([[box_at(50, 100, 1)]])
     pipeline.process_boxes([box_at(50, 100, track_id=1)], timestamp=0.0)
     assert pipeline.detector.calls == 0
 
 
 def test_untracked_detection_is_reported():
-    """track_id가 없으면 잔류·진척도 판정에서 제외되고, 그 사실이 보여야 한다."""
     pipeline = build_pipeline([[box_at(50, 100, track_id=None)]])
     result = pipeline.process_frame(None, timestamp=0.0)
     assert result.untracked_count == 1
@@ -247,7 +214,6 @@ def build_combined(fall_confirmed, boxes):
 
 
 def test_fall_wins_over_zone():
-    """쓰러진 사람이 있으면 연장 요구보다 그쪽이 급하다."""
     combined, serial = build_combined(True, [box_at(50, 100, 1)])
     result = combined.process_frame(None, timestamp=0.0)
 
@@ -266,7 +232,6 @@ def test_zone_resumes_when_fall_clears():
 
 
 def test_combined_runs_inference_once_per_frame():
-    """이 클래스의 존재 이유 — 추론이 두 번 돌면 FPS가 반토막 난다."""
     combined, _ = build_combined(False, [box_at(50, 100, 1)])
     combined.process_frame(None, timestamp=0.0)
     combined.process_frame(None, timestamp=1.0)
@@ -274,11 +239,6 @@ def test_combined_runs_inference_once_per_frame():
 
 
 def test_zone_resumes_immediately_after_fall_without_normal():
-    """쓰러졌다 일어나 횡단보도에 남으면 FALL -> ZONE 으로 바로 넘어간다 (NORMAL이 끼지 않는다).
-
-    아두이노가 "normal을 받아야 부저를 끈다"로 짜면 이 구간에서 부저가 영영 울린다.
-    계약은 `부저 = (마지막 상태 == fall)` 이다 — README.md 참고.
-    """
     boxes = [box_at(50, 100, 1)]
     serial = FakeSerial()
     extension = build_pipeline([boxes] * 3)
@@ -298,7 +258,6 @@ def test_zone_resumes_immediately_after_fall_without_normal():
 
 
 def test_normal_means_nobody_not_fall_cleared():
-    """normal은 '쓰러짐 해제'가 아니라 '확정 보행자 없음'이다."""
     serial = FakeSerial()
     extension = build_pipeline([[]])
     combined = CombinedPipeline(
@@ -309,7 +268,6 @@ def test_normal_means_nobody_not_fall_cleared():
 
 
 def test_progress_survives_track_id_reissue():
-    """★ 이 기능의 본체. 상속이 없으면 진척도가 4,5 대신 2,1로 뒤집힌다."""
     frames = [
         [box_at(50, 20, 1)],
         [box_at(50, 60, 1)],
@@ -326,7 +284,6 @@ def test_progress_survives_track_id_reissue():
 
 
 def test_progress_is_reversed_without_inheritance():
-    """상속을 끄면 실제로 뒤집힌다 — 위 테스트가 무엇을 막고 있는지 고정한다."""
     frames = [
         [box_at(50, 20, 1)],
         [box_at(50, 60, 1)],
@@ -343,7 +300,6 @@ def test_progress_is_reversed_without_inheritance():
 
 
 def test_reissue_keeps_sending_zone_without_a_normal_gap():
-    """재발급 프레임에도 확정 보행자가 유지되어 normal이 끼어들지 않는다."""
     inside = [box_at(50, 100, 1)]
     frames = [inside, inside, [box_at(50, 105, 7)]]
     pipeline = build_pipeline(frames)

@@ -16,4 +16,5 @@ data/*
 .idea/
 CLAUDE.md
 AGENTS.md
-log.md
+docs/log.md
+tests/test*

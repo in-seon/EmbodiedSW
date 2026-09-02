@@ -1,8 +1,4 @@
-"""FallAlarmPipeline 단위 테스트 — 카메라·YOLO·아두이노 없이 배선을 검증한다.
-
-여기서 확인하는 것은 쓰러짐 판정 로직이 아니라(그건 test_fall_detection.py),
-**검출 결과가 부저 명령까지 제대로 이어지는가**다.
-"""
+"""FallAlarmPipeline 단위 테스트 — 카메라·YOLO·아두이노 없이 배선을 검증."""
 
 import numpy as np
 import pytest
@@ -20,8 +16,6 @@ CFG = dict(config.FALL_CONFIG, fall_confirm_sec=3.0, fall_clear_sec=3.0)
 
 
 class FakeDetector:
-    """프레임마다 미리 정해둔 박스 목록을 돌려준다."""
-
     def __init__(self, frames):
         self.frames = list(frames)
         self.calls = 0
@@ -33,8 +27,6 @@ class FakeDetector:
 
 
 class SpySerial:
-    """상태 전송을 기록한다. 실제 SerialComm처럼 '바뀔 때만' 기록해 전이를 보기 쉽게 한다."""
-
     def __init__(self):
         self.commands = []
         self.state = None
@@ -60,13 +52,11 @@ class SpySerial:
 
 
 def standing(track_id=1):
-    """ROI 안에 서 있는 사람 — 세로로 긴 박스."""
     return BoundingBox(x1=300, y1=200, x2=340, y2=400,
                        confidence=0.9, label="person", track_id=track_id)
 
 
 def fallen(track_id=1):
-    """ROI 안에 쓰러진 사람 — 가로로 긴 박스(가로/세로 >= fall_aspect_ratio 1.3)."""
     return BoundingBox(x1=250, y1=380, x2=450, y2=440,
                        confidence=0.9, label="person", track_id=track_id)
 
@@ -93,7 +83,6 @@ def test_standing_person_does_not_trigger_alarm():
 
 
 def test_fall_must_persist_before_alarm():
-    """fall_confirm_sec(3초)를 채우기 전에는 부저를 울리지 않는다 — 오탐 방지."""
     pipeline, spy = build([[fallen()]])
 
     assert pipeline.process_frame(FRAME, now=0.0).fall_confirmed is False
@@ -112,7 +101,6 @@ def test_sustained_fall_sends_alert_once():
 
 
 def test_getting_up_sends_stop():
-    """확정 후 정상 자세가 fall_clear_sec(3초) 이어지면 해제된다."""
     frames = [[fallen()]] * 5 + [[standing()]] * 6
     pipeline, spy = build(frames)
 
@@ -124,7 +112,6 @@ def test_getting_up_sends_stop():
 
 
 def test_alarm_survives_brief_detection_gap():
-    """쓰러진 순간은 오히려 검출이 잘 안 된다 — 한 프레임 빠졌다고 풀리면 안 된다."""
     frames = [[fallen()]] * 5 + [[]] + [[fallen()]] * 2
     pipeline, spy = build(frames)
 
@@ -147,7 +134,6 @@ def test_reset_alarm_clears_state_and_buzzer():
 
 
 def test_roi_falls_back_to_frame_ratio():
-    """roi_px도 zones도 없으면 첫 프레임 크기로 화면 비율 ROI를 만든다."""
     pipeline = FallAlarmPipeline(
         camera=object(), detector=FakeDetector([[standing()]]),
         serial_comm=SpySerial(),
@@ -158,7 +144,6 @@ def test_roi_falls_back_to_frame_ratio():
 
 
 def test_detector_runs_once_per_frame():
-    """추론이 프레임 시간의 사실상 전부다 — 프레임당 한 번만 돌아야 한다."""
     pipeline, _ = build([[standing()]])
     for t in (0.0, 1.0, 2.0):
         pipeline.process_frame(FRAME, now=t)
