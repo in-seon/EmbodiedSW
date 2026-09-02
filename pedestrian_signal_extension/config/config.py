@@ -13,7 +13,7 @@ def _weight_path(name: str) -> str:
 
 
 CROSSWALK_ZONE_COUNT = 5
-ZONE_RESIDENCY_FRAMES = 1
+ZONE_RESIDENCY_FRAMES = 2
 ZONE_CONFIG_PATH = str(_PROJECT_ROOT / "data" / "zone_config.json")
 TRACK_GRACE_FRAMES = 5  
 
