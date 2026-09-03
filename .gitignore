@@ -26,3 +26,6 @@ poc_metrics_*.csv
 .idea/
 .DS_Store
 
+# 에이전트 지시 파일 (개인 작업용, 저장소에 올리지 않는다)
+CLAUDE.md
+AGENTS.md
